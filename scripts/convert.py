@@ -1,36 +1,27 @@
 import pandas as pd
 import pandapower as pp
-import pandapower.plotting as plot
 from shapely import wkt
 import re
+import numpy as np
 
 def clean_voltage(val):
-    """Extracts numeric value from strings like '25 kV' or '15 kV'"""
-    if pd.isna(val):
-        return 13.8 # Default fallback voltage
-    # Remove everything except digits and decimal points
+    if pd.isna(val): return 13.8
     numeric_part = re.sub(r'[^0-9.]', '', str(val))
     return float(numeric_part) if numeric_part else 13.8
 
-def create_net_from_csv(file_path):
+def create_complete_network(file_path):
     df = pd.read_csv(file_path)
     net = pp.create_empty_network()
     coords_to_bus = {}
 
-    print(f"Processing {len(df)} segments...")
-
+    print("Building topology...")
     for index, row in df.iterrows():
         try:
-            # 1. CLEAN THE VOLTAGE DATA
             vn_kv = clean_voltage(row['Voltage'])
-            
-            # 2. PARSE GEOMETRY
             line_geom = wkt.loads(row['Geometry'])
-            # Take start/end of the first segment in the MULTILINESTRING
-            coords = list(line_geom.geoms[0].coords)
             
-            # 3. ROUND COORDINATES (Snapping)
-            # Rounding to 6 decimal places (~10cm precision) helps lines connect
+            # Extract coordinates from the first part of the multiline
+            coords = list(line_geom.geoms[0].coords)
             start_pt = tuple(round(c, 6) for c in coords[0])
             end_pt = tuple(round(c, 6) for c in coords[-1])
 
@@ -43,26 +34,50 @@ def create_net_from_csv(file_path):
             from_bus = get_or_create_bus(start_pt, vn_kv)
             to_bus = get_or_create_bus(end_pt, vn_kv)
 
-            # 4. CREATE THE LINE
-            # Distance estimate: 1 degree approx 111km
+            # Create Line
             dist_km = ((start_pt[0]-end_pt[0])**2 + (start_pt[1]-end_pt[1])**2)**0.5 * 111
-
             pp.create_line_from_parameters(
                 net, from_bus=from_bus, to_bus=to_bus, length_km=max(dist_km, 0.001),
-                r_ohm_per_km=0.1, x_ohm_per_km=0.1, c_nf_per_km=150, max_i_ka=0.4,
-                name=f"Line_{index}"
+                r_ohm_per_km=0.1, x_ohm_per_km=0.1, c_nf_per_km=150, max_i_ka=0.4
             )
+        except Exception:
+            continue
 
-        except Exception as e:
-            print(f"Error on row {index}: {e}")
+    # --- NEW: POPULATING FUNCTIONAL TABLES ---
+
+    # 1. External Grid (The Connection to Alberta's Main Grid)
+    # We'll attach this to the first bus created as our "Slack" bus
+    if len(net.bus) > 0:
+        pp.create_ext_grid(net, bus=0, vm_pu=1.0, name="Main Substation Connection")
+
+    # 2. Loads (Representing Edmonton neighborhoods/customers)
+    # We will add a small load (e.g., 0.1 MW) to every "leaf" bus (buses with only 1 connection)
+    print("Populating loads and generators...")
+    for b_idx in net.bus.index:
+        # Count connections to this bus
+        connections = len(net.line[net.line.from_bus == b_idx]) + len(net.line[net.line.to_bus == b_idx])
+        
+        if connections == 1: # It's an endpoint/cul-de-sac
+            pp.create_load(net, bus=b_idx, p_mw=0.1, q_mvar=0.02, name=f"Load_at_Bus_{b_idx}")
+
+    # 3. Generators (Representing local Distributed Energy Resources)
+    # Let's place a few solar-sized generators (0.05 MW) randomly at 5% of the buses
+    gen_indices = np.random.choice(net.bus.index, size=int(len(net.bus)*0.05), replace=False)
+    for g_idx in gen_indices:
+        pp.create_sgen(net, bus=g_idx, p_mw=0.05, q_mvar=0, name=f"Solar_Gen_{g_idx}")
 
     return net
 
 if __name__ == "__main__":
-    net = create_net_from_csv("/Users/donvu/Developer/apic/Solar-Labs-LTD/data/Circuit_Layer_20260430.csv")
-    print(f"Success! Created {len(net.bus)} buses and {len(net.line)} lines.")
+    net = create_complete_network("/Users/donvu/Developer/apic/Solar-Labs-LTD/data/Circuit_Layer_20260430.csv")
+    print("\n--- Final Data Table Counts ---")
+    print(f"Buses: {len(net.bus)}")
+    print(f"Lines: {len(net.line)}")
+    print(f"Loads (Consumers): {len(net.load)}")
+    print(f"Static Generators (Solar/Local): {len(net.sgen)}")
+    print(f"External Grid: {len(net.ext_grid)}")
     
-     # 2. View the basic network architecture
+        # 2. View the basic network architecture
     print("\n--- Network Summary ---")
     print(net)
 
@@ -93,4 +108,5 @@ if __name__ == "__main__":
     print("Close the matplotlib plot window to end the script.")
     
     # simple_plot creates a straightforward node-breaker/bus-branch diagram
-    plot.simple_plot(net, show_plot=True)
+    # plot.simple_plot(net, show_plot=True)
+    pp.to_json(net, "edmonton_grid.json")
