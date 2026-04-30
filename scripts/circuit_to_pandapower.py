@@ -1,5 +1,6 @@
 import pandas as pd
 import pandapower as pp
+import pandapower.topology as top
 import re
 from shapely.geometry import shape, LineString, MultiLineString
 from shapely.wkt import loads
@@ -133,20 +134,36 @@ def create_network_from_csv(csv_path, output_path, max_lines=None):
     # Create external grid (slack bus for power flow)
     print("Creating external grid and loads/generators...")
     if len(net.bus) > 0:
-        ext_grid_bus = net.bus.index[0]
-        pp.create_ext_grid(net, bus=ext_grid_bus, vm_pu=1.0, va_degree=0)
+        # Create slack buses for the largest islands
+        mg = top.create_nxgraph(net)
+        islands = sorted(top.connected_components(mg), key=len, reverse=True)
+        
+        # Add a slack bus to the first 50 largest islands to ensure most of the network is solvable
+        for i in range(min(50, len(islands))):
+            island_buses = list(islands[i])
+            if island_buses:
+                pp.create_ext_grid(net, bus=island_buses[0], vm_pu=1.0, va_degree=0)
 
-    # Add a few sample loads (10% of buses)
-    num_loads = max(1, len(net.bus) // 10)
-    for i, bus_idx in enumerate(net.bus.index[:num_loads]):
-        pp.create_load(net, bus=bus_idx, p_mw=0.1, q_mvar=0.05,
-                       name=f"Load_{bus_idx}")
+    # Add a few sample loads (distributed)
+    bus_indices = net.bus.index.tolist()
+    num_loads = len(bus_indices) // 10
+    if num_loads > 0:
+        import numpy as np
+        load_buses = np.random.choice(bus_indices, num_loads, replace=False)
+        for i, bus_idx in enumerate(load_buses):
+            pp.create_load(net, bus=bus_idx, p_mw=0.01, q_mvar=0.005,
+                           name=f"Load_{bus_idx}")
 
-    # Add a few sample generators (5% of buses)
-    num_gens = max(1, len(net.bus) // 20)
-    for i, bus_idx in enumerate(net.bus.index[1:num_gens+1]):
-        pp.create_gen(net, bus=bus_idx, p_mw=1.0, vm_pu=1.0,
-                      name=f"Gen_{bus_idx}")
+    # Add a few sample generators (distributed)
+    num_gens = len(bus_indices) // 50
+    if num_gens > 0:
+        gen_buses = np.random.choice(bus_indices, num_gens, replace=False)
+        for i, bus_idx in enumerate(gen_buses):
+            # Check if bus already has a load or is a slack bus
+            if bus_idx in net.ext_grid.bus.values:
+                continue
+            pp.create_gen(net, bus=bus_idx, p_mw=0.05, vm_pu=1.0,
+                          name=f"Gen_{bus_idx}")
 
     # Add transformers connecting different voltage levels if applicable
     print("Adding transformers and other elements...")
