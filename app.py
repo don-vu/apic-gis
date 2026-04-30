@@ -3,6 +3,7 @@ import folium
 from streamlit_folium import st_folium
 import geopandas as gpd
 from shapely.geometry import box
+import os
 
 # Setup
 st.set_page_config(page_title="Solar Intelligence", layout="wide")
@@ -19,7 +20,7 @@ st.markdown("""
 
 @st.cache_data
 def load_data():
-    gdf = gpd.read_parquet("data.parquet")
+    gdf = gpd.read_parquet("data/data.parquet")
 
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326)
@@ -35,27 +36,60 @@ def load_data():
     gdf['homes_powered'] = gdf['solar_potential_kwh'] / 7200
     gdf['evs_charged'] = gdf['solar_potential_kwh'] / 3040
 
-    gdf['geometry'] = gdf['geometry'].simplify(0.00001, preserve_topology=True)
+    # Stronger simplification to reduce data size
+    gdf['geometry'] = gdf['geometry'].simplify(0.00005, preserve_topology=True)
 
     gdf.sindex
 
     gdf["tooltip_html"] = gdf.apply(
-    lambda row: f"""
-    <div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>
-        <h4 style='margin-top: 0; color: #FF9F00;'>Building #{row.building_id}</h4>
-        <b>Roof Area:</b> {row.area:,.0f} m²<br>
-        <b>Energy Potential:</b> {row.solar_potential_kwh:,.0f} kWh/yr<br>
-        <b>Est. Savings:</b> <span style='color: green;'>${row.money_saved:,.0f}/yr</span>
-    </div>
-    """,
-    axis=1
-)
+        lambda row: f"""
+        <div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>
+            <h4 style='margin-top: 0; color: #FF9F00;'>Building #{row.building_id}</h4>
+            <b>Roof Area:</b> {row.area:,.0f} m²<br>
+            <b>Energy Potential:</b> {row.solar_potential_kwh:,.0f} kWh/yr<br>
+            <b>Est. Savings:</b> <span style='color: green;'>${row.money_saved:,.0f}/yr</span>
+        </div>
+        """,
+        axis=1
+    )
     
-    center = gdf.geometry.centroid.iloc[0]
+    # Fix centroid warning by re-projecting to UTM zone 12N (EPSG:26912) for calculation
+    center = gdf.to_crs(epsg=26912).geometry.centroid.to_crs(epsg=4326).iloc[0]
+    
+    # Strip unnecessary columns to reduce GeoJSON size sent to browser
+    keep_cols = ['geometry', 'tooltip_html', 'solar_potential_kwh', 'money_saved', 
+                 'co2_saved_tonnes', 'homes_powered', 'evs_charged', 'building_id']
+    gdf = gdf[keep_cols]
+    
     return gdf, center
+
+@st.cache_data
+def load_circuit_data():
+    circuit_path = "data/circuit_network.geojson"
+    if not os.path.exists(circuit_path):
+        return None
+    
+    # Reading large GeoJSON
+    gdf = gpd.read_file(circuit_path)
+    if gdf.crs is None:
+        gdf = gdf.set_crs(epsg=4326)
+    else:
+        gdf = gdf.to_crs(epsg=4326)
+    
+    # Stronger simplification for the grid to reduce data size
+    gdf['geometry'] = gdf['geometry'].simplify(0.0002, preserve_topology=True)
+    
+    # Only keep essential columns for the browser
+    if 'element_type' in gdf.columns:
+        gdf = gdf[['geometry', 'element_type']]
+    else:
+        gdf = gdf[['geometry']]
+        
+    return gdf
 
 with st.spinner("Analyzing rooftop AI data..."):
     gdf, center = load_data()
+    circuit_gdf = load_circuit_data()
 
 # Base maps
 m = folium.Map(
@@ -65,6 +99,19 @@ m = folium.Map(
     attr="Google Satellite",
     max_zoom=20
 )
+
+# Add circuit network if available
+if circuit_gdf is not None:
+    folium.GeoJson(
+        circuit_gdf,
+        name="Grid Infrastructure",
+        style_function=lambda x: {
+            "color": "#00E5FF" if x["properties"]["element_type"] == "line" else "#2979FF",
+            "weight": 3 if x["properties"]["element_type"] == "line" else 1,
+            "opacity": 0.8,
+        },
+        marker=folium.CircleMarker(radius=2, color="#2979FF", fill=True, fill_opacity=0.9)
+    ).add_to(m)
 
 # Add all the orange buildings
 folium.GeoJson(
