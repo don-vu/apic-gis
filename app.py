@@ -2,7 +2,10 @@ import streamlit as st
 import folium
 from streamlit_folium import st_folium
 import geopandas as gpd
-from shapely.geometry import box
+from shapely.geometry import box, Point, LineString
+import json
+import pandas as pd
+from pathlib import Path
 
 # Setup
 st.set_page_config(page_title="Solar Intelligence", layout="wide")
@@ -19,7 +22,7 @@ st.markdown("""
 
 @st.cache_data
 def load_data():
-    gdf = gpd.read_parquet("data.parquet")
+    gdf = gpd.read_parquet("data/data.parquet")
 
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326)
@@ -50,12 +53,85 @@ def load_data():
     """,
     axis=1
 )
-    
+
     center = gdf.geometry.centroid.iloc[0]
     return gdf, center
 
+@st.cache_data
+def load_circuit_data():
+    circuit_gdf = gpd.read_file("data/Circuit_Layer_20260430.geojson")
+    circuit_gdf = circuit_gdf.to_crs(epsg=4326)
+    return circuit_gdf
+
+@st.cache_data
+def load_pandapower_network():
+    try:
+        with open("data/circuit_network.json", "r") as f:
+            net_data = json.load(f)
+        return net_data
+    except Exception as e:
+        st.warning(f"Could not load pandapower network: {e}")
+        return None
+
+def pandapower_to_geojson(net_data):
+    """Convert pandapower network to GeoJSON features"""
+    if not net_data or '_object' not in net_data:
+        return None
+
+    obj = net_data['_object']
+    features = []
+
+    # Convert lines to GeoJSON
+    if 'line' in obj and isinstance(obj['line'], dict):
+        lines_df = pd.DataFrame(obj['line']).T
+        if 'x_start_coord' in lines_df.columns and 'y_start_coord' in lines_df.columns:
+            for idx, row in lines_df.iterrows():
+                try:
+                    if pd.notna(row.get('x_start_coord')) and pd.notna(row.get('x_end_coord')):
+                        coords = [[row['y_start_coord'], row['x_start_coord']],
+                                 [row['y_end_coord'], row['x_end_coord']]]
+                        feature = {
+                            "type": "Feature",
+                            "geometry": {"type": "LineString", "coordinates": coords},
+                            "properties": {
+                                "type": "line",
+                                "name": row.get('name', f"Line {idx}"),
+                                "length_km": row.get('length_km', 0)
+                            }
+                        }
+                        features.append(feature)
+                except:
+                    pass
+
+    # Convert buses to GeoJSON
+    if 'bus' in obj and isinstance(obj['bus'], dict):
+        buses_df = pd.DataFrame(obj['bus']).T
+        if 'x_coord' in buses_df.columns and 'y_coord' in buses_df.columns:
+            for idx, row in buses_df.iterrows():
+                try:
+                    if pd.notna(row.get('x_coord')) and pd.notna(row.get('y_coord')):
+                        feature = {
+                            "type": "Feature",
+                            "geometry": {"type": "Point", "coordinates": [row['y_coord'], row['x_coord']]},
+                            "properties": {
+                                "type": "bus",
+                                "name": row.get('name', f"Bus {idx}"),
+                                "vn_kv": row.get('vn_kv', 0)
+                            }
+                        }
+                        features.append(feature)
+                except:
+                    pass
+
+    if features:
+        return {"type": "FeatureCollection", "features": features}
+    return None
+
 with st.spinner("Analyzing rooftop AI data..."):
     gdf, center = load_data()
+    circuit_gdf = load_circuit_data()
+    net_data = load_pandapower_network()
+    pandapower_geojson = pandapower_to_geojson(net_data) if net_data else None
 
 # Base maps
 m = folium.Map(
@@ -66,9 +142,60 @@ m = folium.Map(
     max_zoom=20
 )
 
+# Add pandapower network lines (cyan)
+if pandapower_geojson:
+    line_features = [f for f in pandapower_geojson['features'] if f['properties'].get('type') == 'line']
+    if line_features:
+        folium.GeoJson(
+            {"type": "FeatureCollection", "features": line_features},
+            style_function=lambda x: {
+                "color": "#00BCD4",
+                "weight": 2,
+                "opacity": 0.7,
+                "dashArray": "5, 5"
+            },
+            tooltip="Pandapower Line",
+        ).add_to(m)
+
+# Add pandapower network buses (blue points)
+if pandapower_geojson:
+    bus_features = [f for f in pandapower_geojson['features'] if f['properties'].get('type') == 'bus']
+    if bus_features:
+        for feature in bus_features:
+            coords = feature['geometry']['coordinates']
+            folium.CircleMarker(
+                location=[coords[0], coords[1]],
+                radius=4,
+                color="#1976D2",
+                fill=True,
+                fillColor="#1976D2",
+                fillOpacity=0.7,
+                weight=1,
+                popup=feature['properties'].get('name'),
+                tooltip="Bus: " + feature['properties'].get('name', 'Unknown')
+            ).add_to(m)
+
+# Add circuit layer (red lines)
+if not circuit_gdf.empty:
+    circuit_gdf_clean = circuit_gdf.copy()
+    for col in circuit_gdf_clean.columns:
+        if pd.api.types.is_datetime64_any_dtype(circuit_gdf_clean[col]):
+            circuit_gdf_clean[col] = circuit_gdf_clean[col].astype(str)
+    circuit_geojson = circuit_gdf_clean.to_json()
+    folium.GeoJson(
+        circuit_geojson,
+        style_function=lambda x: {
+            "color": "#FF0000",
+            "weight": 1.5,
+            "opacity": 0.6,
+        },
+        tooltip="Circuit Layer",
+    ).add_to(m)
+
 # Add all the orange buildings
+buildings_geojson = gdf.to_json()
 folium.GeoJson(
-    gdf,
+    buildings_geojson,
     tooltip=folium.GeoJsonTooltip(
         fields=["tooltip_html"],
         aliases=[""],
@@ -90,6 +217,36 @@ folium.GeoJson(
         "fillOpacity": 0.5,
     },
 ).add_to(m)
+
+# Add legend
+legend_html = '''
+     <div style="
+     position: fixed; bottom: 20px; left: 20px; width: 200px;
+     background-color: rgba(255, 255, 255, 0.98);
+     border: 1px solid #e0e0e0; z-index: 99998; font-family: sans-serif;
+     border-radius: 8px; padding: 15px;
+     box-shadow: 0px 4px 12px rgba(0,0,0,0.15);
+     ">
+     <h4 style="margin: 0 0 10px 0; font-size: 14px;">Map Layers</h4>
+     <div style="margin-bottom: 8px;">
+         <span style="display: inline-block; width: 20px; height: 2px; background-color: #FFB300; margin-right: 8px; vertical-align: middle;"></span>
+         <span style="font-size: 12px;">Buildings (Solar)</span>
+     </div>
+     <div style="margin-bottom: 8px;">
+         <span style="display: inline-block; width: 20px; height: 2px; background-color: #FF0000; margin-right: 8px; vertical-align: middle;"></span>
+         <span style="font-size: 12px;">Circuit Layer</span>
+     </div>
+     <div style="margin-bottom: 8px;">
+         <span style="display: inline-block; width: 20px; height: 2px; background-color: #00BCD4; margin-right: 8px; vertical-align: middle; border: 1px dashed;"></span>
+         <span style="font-size: 12px;">Pandapower Lines</span>
+     </div>
+     <div>
+         <span style="display: inline-block; width: 8px; height: 8px; background-color: #1976D2; border-radius: 50%; margin-right: 8px; vertical-align: middle;"></span>
+         <span style="font-size: 12px;">Buses</span>
+     </div>
+     </div>
+'''
+m.get_root().html.add_child(folium.Element(legend_html))
 
 map_data = st_folium(m, width="100%", height=900, key="solar_map", returned_objects=["bounds"])
 
@@ -119,11 +276,12 @@ total_evs = visible_gdf['evs_charged'].sum()
 # --- THE FINAL POLISHED LEGEND ---
 st.markdown(f'''
      <div style="
-     position: fixed; top: 20px; right: 20px; width: 320px; 
-     background-color: rgba(255, 255, 255, 0.98); 
+     position: fixed; top: 20px; right: 20px; width: 320px;
+     background-color: rgba(255, 255, 255, 0.98);
      border: 1px solid #e0e0e0; z-index: 99999; font-family: sans-serif;
-     border-radius: 12px; padding: 18px 20px; 
+     border-radius: 12px; padding: 18px 20px;
      box-shadow: 0px 8px 24px rgba(0,0,0,0.15);
+     max-height: 90vh; overflow-y: auto;
      ">
      
      <h4 style="color: #111; margin: 0 0 4px 0; font-size: 15px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;">
