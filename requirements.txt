@@ -1,0 +1,10 @@
+streamlit
+folium
+streamlit_folium
+geopandas
+shapely
+transformers
+Pillow
+torch
+rasterio
+numpy
