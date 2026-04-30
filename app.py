@@ -4,6 +4,7 @@ from streamlit_folium import st_folium
 import geopandas as gpd
 from shapely.geometry import box
 import os
+import pandas as pd
 
 # Setup
 st.set_page_config(page_title="Solar Intelligence", layout="wide")
@@ -14,33 +15,31 @@ st.markdown("""
         header {visibility: hidden;}
         footer {visibility: hidden;}
         .stApp { overflow: hidden !important; }
-        iframe { height: 100vh !important; width: 100vw !important; }
+        .stSpinner { position: fixed; top: 50%; left: 50%; z-index: 9999; }
     </style>
 """, unsafe_allow_html=True)
 
 @st.cache_data
-def load_data():
+def load_full_data():
+    """Load the full datasets into memory once."""
+    # Buildings
     gdf = gpd.read_parquet("data/data.parquet")
-
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326)
     else:
         gdf = gdf.to_crs(epsg=4326)
 
-    # Base Energy & Money (Updated to Edmonton's 1246 potential)
+    # Calculations
     gdf['solar_potential_kwh'] = gdf['area'] * 0.7 * 1246 * 0.2
     gdf['money_saved'] = gdf['solar_potential_kwh'] * 0.15
-
-    # Impact Metrics
     gdf['co2_saved_tonnes'] = (gdf['solar_potential_kwh'] * 0.424) / 1000
     gdf['homes_powered'] = gdf['solar_potential_kwh'] / 7200
     gdf['evs_charged'] = gdf['solar_potential_kwh'] / 3040
-
-    # Stronger simplification to reduce data size
-    gdf['geometry'] = gdf['geometry'].simplify(0.00005, preserve_topology=True)
-
-    gdf.sindex
-
+    
+    # Simplify once for performance
+    gdf['geometry'] = gdf['geometry'].simplify(0.00001, preserve_topology=True)
+    
+    # Tooltip
     gdf["tooltip_html"] = gdf.apply(
         lambda row: f"""
         <div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>
@@ -53,57 +52,85 @@ def load_data():
         axis=1
     )
     
-    # Fix centroid warning by re-projecting to UTM zone 12N (EPSG:26912) for calculation
-    center = gdf.to_crs(epsg=26912).geometry.centroid.to_crs(epsg=4326).iloc[0]
+    # Center calculation
+    center_point = gdf.to_crs(epsg=26912).geometry.centroid.to_crs(epsg=4326).iloc[0]
+    center = (center_point.y, center_point.x)
     
-    # Strip unnecessary columns to reduce GeoJSON size sent to browser
-    keep_cols = ['geometry', 'tooltip_html', 'solar_potential_kwh', 'money_saved', 
-                 'co2_saved_tonnes', 'homes_powered', 'evs_charged', 'building_id']
-    gdf = gdf[keep_cols]
-    
-    return gdf, center
-
-@st.cache_data
-def load_circuit_data():
+    # Grid
     circuit_path = "data/circuit_network.geojson"
-    if not os.path.exists(circuit_path):
-        return None
-    
-    # Reading large GeoJSON
-    gdf = gpd.read_file(circuit_path)
-    if gdf.crs is None:
-        gdf = gdf.set_crs(epsg=4326)
+    circuit_gdf = None
+    if os.path.exists(circuit_path):
+        circuit_gdf = gpd.read_file(circuit_path)
+        if circuit_gdf.crs is None:
+            circuit_gdf = circuit_gdf.set_crs(epsg=4326)
+        else:
+            circuit_gdf = circuit_gdf.to_crs(epsg=4326)
+        circuit_gdf['geometry'] = circuit_gdf['geometry'].simplify(0.00005, preserve_topology=True)
+        if 'element_type' not in circuit_gdf.columns:
+            circuit_gdf['element_type'] = 'line'
+        circuit_gdf = circuit_gdf[['geometry', 'element_type']]
+
+    return gdf, circuit_gdf, center
+
+with st.spinner("Loading Edmonton Solar & Grid Data..."):
+    full_gdf, full_circuit_gdf, default_center = load_full_data()
+
+# Initialize session state for viewport
+if "center" not in st.session_state:
+    st.session_state.center = default_center
+if "zoom" not in st.session_state:
+    st.session_state.zoom = 18
+
+# Viewport Filtering Logic
+# We use a placeholder or the last known bounds to filter data BEFORE sending to folium
+def get_visible_data(gdf, circuit_gdf, bounds):
+    if bounds is None:
+        # Default view: small box around center
+        lat, lon = st.session_state.center
+        buffer = 0.005
+        view_box = box(lon - buffer, lat - buffer, lon + buffer, lat + buffer)
     else:
-        gdf = gdf.to_crs(epsg=4326)
+        sw = bounds["_southWest"]
+        ne = bounds["_northEast"]
+        view_box = box(sw["lng"], sw["lat"], ne["lng"], ne["lat"])
     
-    # Stronger simplification for the grid to reduce data size
-    gdf['geometry'] = gdf['geometry'].simplify(0.0002, preserve_topology=True)
+    # Filter buildings
+    spatial_index = gdf.sindex
+    possible_indices = list(spatial_index.intersection(view_box.bounds))
+    visible_gdf = gdf.iloc[possible_indices].copy()
+    visible_gdf = visible_gdf[visible_gdf.geometry.intersects(view_box)]
     
-    # Only keep essential columns for the browser
-    if 'element_type' in gdf.columns:
-        gdf = gdf[['geometry', 'element_type']]
-    else:
-        gdf = gdf[['geometry']]
+    # Filter circuit (only if zoomed in)
+    visible_circuit = None
+    if circuit_gdf is not None and st.session_state.zoom >= 16:
+        c_spatial_index = circuit_gdf.sindex
+        c_possible_indices = list(c_spatial_index.intersection(view_box.bounds))
+        visible_circuit = circuit_gdf.iloc[c_possible_indices].copy()
+        visible_circuit = visible_circuit[visible_circuit.geometry.intersects(view_box)]
         
-    return gdf
+    return visible_gdf, visible_circuit
 
-with st.spinner("Analyzing rooftop AI data..."):
-    gdf, center = load_data()
-    circuit_gdf = load_circuit_data()
+# Get bounds from st_folium (it returns the bounds of the PREVIOUS render)
+last_map_data = st.session_state.get("last_map_data", None)
+current_bounds = last_map_data.get("bounds") if last_map_data else None
 
-# Base maps
+# Filter data for the CURRENT render
+visible_buildings, visible_grid = get_visible_data(full_gdf, full_circuit_gdf, current_bounds)
+
+# Create the map
 m = folium.Map(
-    location=[center.y, center.x],
-    zoom_start=18,
+    location=st.session_state.center,
+    zoom_start=st.session_state.zoom,
     tiles="http://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}",
     attr="Google Satellite",
-    max_zoom=20
+    max_zoom=20,
+    zoom_control=True
 )
 
-# Add circuit network if available
-if circuit_gdf is not None:
+# Add grid if visible
+if visible_grid is not None and len(visible_grid) > 0:
     folium.GeoJson(
-        circuit_gdf,
+        visible_grid,
         name="Grid Infrastructure",
         style_function=lambda x: {
             "color": "#00E5FF" if x["properties"]["element_type"] == "line" else "#2979FF",
@@ -113,55 +140,55 @@ if circuit_gdf is not None:
         marker=folium.CircleMarker(radius=2, color="#2979FF", fill=True, fill_opacity=0.9)
     ).add_to(m)
 
-# Add all the orange buildings
-folium.GeoJson(
-    gdf,
-    tooltip=folium.GeoJsonTooltip(
-        fields=["tooltip_html"],
-        aliases=[""],
-        labels=False,
-        sticky=True,
-        max_width=300,
-        style="""
-            background-color: white;
-            border: 1px solid #e0e0e0;
-            border-radius: 8px;
-            box-shadow: 0px 4px 12px rgba(0,0,0,0.15);
-            padding: 0px;
-        """
-    ),
-    style_function=lambda x: {
-        "fillColor": "#FFB300",
-        "color": "#FF8F00",
-        "weight": 2,
-        "fillOpacity": 0.5,
-    },
-).add_to(m)
+# Add buildings
+if len(visible_buildings) > 0:
+    folium.GeoJson(
+        visible_buildings[['geometry', 'tooltip_html']],
+        tooltip=folium.GeoJsonTooltip(
+            fields=["tooltip_html"],
+            aliases=[""],
+            labels=False,
+            sticky=True,
+            max_width=300
+        ),
+        style_function=lambda x: {
+            "fillColor": "#FFB300",
+            "color": "#FF8F00",
+            "weight": 2,
+            "fillOpacity": 0.5,
+        },
+    ).add_to(m)
 
-map_data = st_folium(m, width="100%", height=900, key="solar_map", returned_objects=["bounds"])
+# Render map
+map_output = st_folium(
+    m, 
+    width="100%", 
+    height=900, 
+    key="solar_map", 
+    returned_objects=["bounds", "center", "zoom"]
+)
 
-# Filter visible buildings
-gdf = gdf.set_geometry("geometry")
+# Update session state and rerun if the view changed
+if map_output:
+    changed = False
+    if map_output.get("center") and map_output["center"] != st.session_state.center:
+        st.session_state.center = (map_output["center"]["lat"], map_output["center"]["lng"])
+        changed = True
+    if map_output.get("zoom") and map_output["zoom"] != st.session_state.zoom:
+        st.session_state.zoom = map_output["zoom"]
+        changed = True
+    
+    if changed:
+        st.session_state.last_map_data = map_output
+        st.rerun()
 
-if map_data and map_data.get("bounds"):
-    bounds = map_data["bounds"]
-    sw_lon, sw_lat = bounds["_southWest"]["lng"], bounds["_southWest"]["lat"]
-    ne_lon, ne_lat = bounds["_northEast"]["lng"], bounds["_northEast"]["lat"]
-
-    screen_box = box(sw_lon, sw_lat, ne_lon, ne_lat)
-
-    possible_matches_index = list(gdf.sindex.intersection(screen_box.bounds))
-    possible_matches = gdf.iloc[possible_matches_index]
-
-    visible_gdf = possible_matches[possible_matches.geometry.intersects(screen_box)]
-
-# Calculate totals for ONLY the visible buildings
-total_buildings = len(visible_gdf)
-total_kwh = visible_gdf['solar_potential_kwh'].sum()
-total_savings = visible_gdf['money_saved'].sum()
-total_co2 = visible_gdf['co2_saved_tonnes'].sum()
-total_homes = visible_gdf['homes_powered'].sum()
-total_evs = visible_gdf['evs_charged'].sum()
+# --- Analytics for visible buildings ---
+total_buildings = len(visible_buildings)
+total_kwh = visible_buildings['solar_potential_kwh'].sum()
+total_savings = visible_buildings['money_saved'].sum()
+total_co2 = visible_buildings['co2_saved_tonnes'].sum()
+total_homes = visible_buildings['homes_powered'].sum()
+total_evs = visible_buildings['evs_charged'].sum()
 
 # --- THE FINAL POLISHED LEGEND ---
 st.markdown(f'''
