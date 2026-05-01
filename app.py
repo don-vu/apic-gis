@@ -8,20 +8,20 @@ import pandas as pd
 
 # Grid Configuration
 ELEMENT_CONFIG = {
-    "bus": {"color": "#2979FF", "radius": 3, "label": "Buses"},
-    "load": {"color": "#FF5252", "radius": 4, "label": "Loads"},
+    "bus": {"color": "#2979FF", "radius": 3, "label": "Bus"},
+    "load": {"color": "#FF5252", "radius": 4, "label": "Load"},
     "sgen": {"color": "#FFEA00", "radius": 4, "label": "Static Gen"},
     "gen": {"color": "#FFAB40", "radius": 5, "label": "Generators"},
     "switch": {"color": "#B0BEC5", "radius": 3, "label": "Switches"},
     "shunt": {"color": "#7C4DFF", "radius": 4, "label": "Shunts"},
     "ext_grid": {"color": "#00E676", "radius": 6, "label": "External Grid"},
-    "line": {"color": "#00E5FF", "weight": 3, "label": "Lines"},
+    "line": {"color": "#00E5FF", "weight": 3, "label": "Line"},
     "trafo": {"color": "#F50057", "weight": 4, "label": "Transformers"},
 }
 ELEMENT_TYPES = ["bus", "load", "sgen", "gen", "switch", "shunt", "ext_grid", "line", "trafo"]
 
 # Setup
-st.set_page_config(page_title="Solar Intelligence", layout="wide")
+st.set_page_config(page_title="Solar Labs Ltd.", layout="wide")
 
 st.markdown("""
     <style>
@@ -84,7 +84,11 @@ def load_full_data():
             circuit_gdf['element_type'] = 'line'
         
         # Keep useful properties for tooltips
-        useful_cols = ['geometry', 'element_type', 'name', 'vn_kv', 'p_mw', 'q_mvar', 'length_km', 'sn_mva', 'index']
+        useful_cols = [
+            'geometry', 'element_type', 'name', 'vn_kv', 'p_mw', 'q_mvar', 
+            'length_km', 'sn_mva', 'index', 'from_bus', 'to_bus', 
+            'r_ohm_per_km', 'x_ohm_per_km', 'c_nf_per_km', 'g_us_per_km', 'bus'
+        ]
         cols_to_keep = [c for c in useful_cols if c in circuit_gdf.columns]
         
         # Dynamic Tooltip for Grid
@@ -97,15 +101,38 @@ def load_full_data():
             html = f"<div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>"
             html += f"<h4 style='margin-top: 0; color: {color};'>{label_text}</h4>"
             
-            field_labels = {
-                'name': 'Name',
-                'vn_kv': 'Voltage (kV)',
-                'p_mw': 'Active Power (MW)',
-                'q_mvar': 'Reactive Power (MVAR)',
-                'length_km': 'Length (km)',
-                'sn_mva': 'Rated Power (MVA)',
-                'index': 'ID'
-            }
+            if etype == "line":
+                field_labels = {
+                    'name': 'Name',
+                    'from_bus': 'From Bus',
+                    'to_bus': 'To Bus',
+                    'length_km': 'Length (km)',
+                    'r_ohm_per_km': 'R (Ohm/km)',
+                    'x_ohm_per_km': 'X (Ohm/km)',
+                    'c_nf_per_km': 'C (nF/km)'
+                }
+            elif etype == "load":
+                field_labels = {
+                    'name': 'Name',
+                    'bus': 'Bus',
+                    'p_mw': 'Active Power (MW)',
+                    'q_mvar': 'Reactive Power (MVAR)'
+                }
+            elif etype == "bus":
+                field_labels = {
+                    'name': 'Name',
+                    'vn_kv': 'Voltage (kV)'
+                }
+            else:
+                field_labels = {
+                    'name': 'Name',
+                    'vn_kv': 'Voltage (kV)',
+                    'p_mw': 'Active Power (MW)',
+                    'q_mvar': 'Reactive Power (MVAR)',
+                    'length_km': 'Length (km)',
+                    'sn_mva': 'Rated Power (MVA)',
+                    'index': 'ID'
+                }
             
             for col, label in field_labels.items():
                 if col in row.index and pd.notnull(row[col]):
@@ -114,8 +141,14 @@ def load_full_data():
                         continue
                     if isinstance(val, (int, float)) and pd.isna(val):
                         continue
-                        
-                    if isinstance(val, (int, float)):
+                    
+                    # Format IDs/Buses as integers with no commas
+                    if col in ['from_bus', 'to_bus', 'bus', 'index']:
+                        try:
+                            html += f"<b>{label}:</b> {int(float(val))}<br>"
+                        except (ValueError, TypeError):
+                            html += f"<b>{label}:</b> {val}<br>"
+                    elif isinstance(val, (int, float)):
                         html += f"<b>{label}:</b> {val:,.2f}<br>"
                     else:
                         html += f"<b>{label}:</b> {val}<br>"
