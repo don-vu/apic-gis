@@ -5,6 +5,7 @@ import geopandas as gpd
 from shapely.geometry import box
 import os
 import pandas as pd
+import requests
 
 # Grid Configuration
 ELEMENT_CONFIG = {
@@ -33,6 +34,31 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 @st.cache_data
+def get_pvgis_yield(lat, lon):
+    """Fetches annual energy yield (kWh per 1 kWp) from PVGIS v6 API."""
+    try:
+        url = "https://photovoltaic-geographic-information-system.ec.europa.eu/api/v6/performance/broadband"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "peak-power": 1,
+            "system_efficiency": 0.86,
+            "photovoltaic_module": "cSi:Integrated 2025",
+            "surface_position_optimisation_mode": "Orientation & Tilt",
+            "irradiance_source": "ERA5",
+            "analysis": "Simple",
+            "groupby": "Yearly",
+            "frequency": "Yearly"
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data['Photovoltaic Performance']['Energy 🔌']['value']
+    except Exception as e:
+        st.warning(f"PVGIS API Error: {e}. Using fallback yield.")
+    return 1246.0  # Fallback to previous heuristic value
+
+@st.cache_data
 def load_full_data():
     # Buildings
     gdf = gpd.read_parquet("./data/output/merged_buildings.parquet")
@@ -41,8 +67,22 @@ def load_full_data():
     else:
         gdf = gdf.to_crs(epsg=4326)
 
-    # Calculations
-    gdf['solar_potential_kwh'] = gdf['area'] * 0.7 * 1246 * 0.2
+    # Center calculation
+    if not gdf.empty:
+        try:
+            bounds = gdf.total_bounds
+            center = ((bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2)
+        except Exception:
+            center = (53.5461, -113.4938)
+    else:
+        center = (53.5461, -113.4938)
+
+    # Fetch PVGIS data for the center of the dataset
+    pvgis_yield = get_pvgis_yield(center[0], center[1])
+
+    # Calculations: area * utilization (70%) * efficiency (20%) * yield (kWh/kWp)
+    # 0.7 * 0.2 = 0.14 kWp/m2
+    gdf['solar_potential_kwh'] = gdf['area'] * 0.14 * pvgis_yield
     gdf['money_saved'] = gdf['solar_potential_kwh'] * 0.15
     gdf['co2_saved_tonnes'] = (gdf['solar_potential_kwh'] * 0.424) / 1000
     gdf['homes_powered'] = gdf['solar_potential_kwh'] / 7200
@@ -58,22 +98,12 @@ def load_full_data():
             <b>Roof Area:</b> {row.area:,.0f} m²<br>
             <b>Energy Potential:</b> {row.solar_potential_kwh:,.0f} kWh/yr<br>
             <b>Est. Savings:</b> <span style='color: green;'>${row.money_saved:,.0f}/yr</span>
+            <hr style='margin: 8px 0; border: 0; border-top: 1px solid #eee;'>
+            <div style='font-size: 10px; color: #666;'>Powered by PVGIS v6</div>
         </div>
         """,
         axis=1
     )
-    
-    # Center calculation
-    if not gdf.empty:
-        try:
-            # Use the center of the bounding box for a better default view
-            bounds = gdf.total_bounds
-            center = ((bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2)
-        except Exception:
-            # Fallback to Edmonton center
-            center = (53.5461, -113.4938)
-    else:
-        center = (53.5461, -113.4938)
     
     # Grid
     circuit_path = "./data/output/circuit_network.parquet"
@@ -310,6 +340,7 @@ st.markdown(f'''
      
      <h4 style="color: #111; margin: 0 0 4px 0; font-size: 15px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;">
          Live Screen Analytics
+         <span style="font-size: 10px; color: #888; text-transform: none; float: right; font-weight: normal;">Powered by PVGIS</span>
      </h4>
      
      <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
