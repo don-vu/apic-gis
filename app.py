@@ -6,8 +6,22 @@ from shapely.geometry import box
 import os
 import pandas as pd
 
+# Grid Configuration
+ELEMENT_CONFIG = {
+    "bus": {"color": "#2979FF", "radius": 3, "label": "Bus"},
+    "load": {"color": "#FF5252", "radius": 4, "label": "Load"},
+    "sgen": {"color": "#FFEA00", "radius": 4, "label": "Static Gen"},
+    "gen": {"color": "#FFAB40", "radius": 5, "label": "Generators"},
+    "switch": {"color": "#B0BEC5", "radius": 3, "label": "Switches"},
+    "shunt": {"color": "#7C4DFF", "radius": 4, "label": "Shunts"},
+    "ext_grid": {"color": "#00E676", "radius": 6, "label": "External Grid"},
+    "line": {"color": "#00E5FF", "weight": 3, "label": "Line"},
+    "trafo": {"color": "#F50057", "weight": 4, "label": "Transformers"},
+}
+ELEMENT_TYPES = ["bus", "load", "sgen", "gen", "switch", "shunt", "ext_grid", "line", "trafo"]
+
 # Setup
-st.set_page_config(page_title="Solar Intelligence", layout="wide")
+st.set_page_config(page_title="Solar Labs Ltd.", layout="wide")
 
 st.markdown("""
     <style>
@@ -23,7 +37,7 @@ st.markdown("""
 def load_full_data():
     """Load the full datasets into memory once."""
     # Buildings
-    gdf = gpd.read_parquet("data/data.parquet")
+    gdf = gpd.read_parquet("./data/output/data.parquet")
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326)
     else:
@@ -57,7 +71,7 @@ def load_full_data():
     center = (center_point.y, center_point.x)
     
     # Grid
-    circuit_path = "data/circuit_network.geojson"
+    circuit_path = "./data/output/circuit_network.geojson"
     circuit_gdf = None
     if os.path.exists(circuit_path):
         circuit_gdf = gpd.read_file(circuit_path)
@@ -70,9 +84,80 @@ def load_full_data():
             circuit_gdf['element_type'] = 'line'
         
         # Keep useful properties for tooltips
-        useful_cols = ['geometry', 'element_type', 'name', 'vn_kv', 'p_mw', 'q_mvar', 'length_km', 'sn_mva', 'index']
+        useful_cols = [
+            'geometry', 'element_type', 'name', 'vn_kv', 'p_mw', 'q_mvar', 
+            'length_km', 'sn_mva', 'index', 'from_bus', 'to_bus', 
+            'r_ohm_per_km', 'x_ohm_per_km', 'c_nf_per_km', 'g_us_per_km', 'bus'
+        ]
         cols_to_keep = [c for c in useful_cols if c in circuit_gdf.columns]
-        circuit_gdf = circuit_gdf[cols_to_keep]
+        
+        # Dynamic Tooltip for Grid
+        def make_circuit_tooltip(row):
+            etype = row.get('element_type', 'element')
+            config = ELEMENT_CONFIG.get(etype, {"color": "#2979FF", "label": etype.capitalize()})
+            color = config.get("color", "#2979FF")
+            label_text = config.get("label", etype.capitalize())
+            
+            html = f"<div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>"
+            html += f"<h4 style='margin-top: 0; color: {color};'>{label_text}</h4>"
+            
+            if etype == "line":
+                field_labels = {
+                    'name': 'Name',
+                    'from_bus': 'From Bus',
+                    'to_bus': 'To Bus',
+                    'length_km': 'Length (km)',
+                    'r_ohm_per_km': 'R (Ohm/km)',
+                    'x_ohm_per_km': 'X (Ohm/km)',
+                    'c_nf_per_km': 'C (nF/km)'
+                }
+            elif etype == "load":
+                field_labels = {
+                    'name': 'Name',
+                    'bus': 'Bus',
+                    'p_mw': 'Active Power (MW)',
+                    'q_mvar': 'Reactive Power (MVAR)'
+                }
+            elif etype == "bus":
+                field_labels = {
+                    'name': 'Name',
+                    'vn_kv': 'Voltage (kV)'
+                }
+            else:
+                field_labels = {
+                    'name': 'Name',
+                    'vn_kv': 'Voltage (kV)',
+                    'p_mw': 'Active Power (MW)',
+                    'q_mvar': 'Reactive Power (MVAR)',
+                    'length_km': 'Length (km)',
+                    'sn_mva': 'Rated Power (MVA)',
+                    'index': 'ID'
+                }
+            
+            for col, label in field_labels.items():
+                if col in row.index and pd.notnull(row[col]):
+                    val = row[col]
+                    if isinstance(val, str) and (val.strip() == "" or val.lower() == "nan"):
+                        continue
+                    if isinstance(val, (int, float)) and pd.isna(val):
+                        continue
+                    
+                    # Format IDs/Buses as integers with no commas
+                    if col in ['from_bus', 'to_bus', 'bus', 'index']:
+                        try:
+                            html += f"<b>{label}:</b> {int(float(val))}<br>"
+                        except (ValueError, TypeError):
+                            html += f"<b>{label}:</b> {val}<br>"
+                    elif isinstance(val, (int, float)):
+                        html += f"<b>{label}:</b> {val:,.2f}<br>"
+                    else:
+                        html += f"<b>{label}:</b> {val}<br>"
+            
+            html += "</div>"
+            return html
+
+        circuit_gdf['tooltip_html'] = circuit_gdf.apply(make_circuit_tooltip, axis=1)
+        circuit_gdf = circuit_gdf[cols_to_keep + ['tooltip_html']]
 
     return gdf, circuit_gdf, center
 
@@ -131,20 +216,6 @@ m = folium.Map(
     zoom_control=True
 )
 
-# Grid Configuration
-ELEMENT_CONFIG = {
-    "bus": {"color": "#2979FF", "radius": 3, "label": "Buses"},
-    "load": {"color": "#FF5252", "radius": 4, "label": "Loads"},
-    "sgen": {"color": "#FFEA00", "radius": 4, "label": "Static Gen"},
-    "gen": {"color": "#FFAB40", "radius": 5, "label": "Generators"},
-    "switch": {"color": "#B0BEC5", "radius": 3, "label": "Switches"},
-    "shunt": {"color": "#7C4DFF", "radius": 4, "label": "Shunts"},
-    "ext_grid": {"color": "#00E676", "radius": 6, "label": "External Grid"},
-    "line": {"color": "#00E5FF", "weight": 3, "label": "Lines"},
-    "trafo": {"color": "#F50057", "weight": 4, "label": "Transformers"},
-}
-ELEMENT_TYPES = ["bus", "load", "sgen", "gen", "switch", "shunt", "ext_grid", "line", "trafo"]
-
 # Add grid layers
 if visible_grid is not None and len(visible_grid) > 0:
     for etype in ELEMENT_TYPES:
@@ -153,10 +224,8 @@ if visible_grid is not None and len(visible_grid) > 0:
             config = ELEMENT_CONFIG.get(etype, {"color": "#999999", "label": etype.capitalize()})
             fg = folium.FeatureGroup(name=config["label"]).add_to(m)
             
-            tooltip_cols = [c for c in ['name', 'vn_kv', 'p_mw', 'q_mvar', 'length_km', 'sn_mva', 'index'] if c in subset.columns]
-            
             folium.GeoJson(
-                subset,
+                subset[['geometry', 'tooltip_html']],
                 style_function=lambda x, color=config["color"], weight=config.get("weight", 2): {
                     "color": color,
                     "weight": weight,
@@ -168,7 +237,13 @@ if visible_grid is not None and len(visible_grid) > 0:
                     fill=True,
                     fill_opacity=0.9
                 ) if "radius" in config else None,
-                tooltip=folium.GeoJsonTooltip(fields=tooltip_cols) if tooltip_cols else None
+                tooltip=folium.GeoJsonTooltip(
+                    fields=["tooltip_html"],
+                    aliases=[""],
+                    labels=False,
+                    sticky=True,
+                    max_width=300
+                )
             ).add_to(fg)
 
 # Add buildings
