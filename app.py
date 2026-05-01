@@ -35,7 +35,7 @@ st.markdown("""
 @st.cache_data
 def load_full_data():
     # Buildings
-    gdf = gpd.read_parquet("./data/output/data.parquet")
+    gdf = gpd.read_parquet("./data/output/merged_buildings.parquet")
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326)
     else:

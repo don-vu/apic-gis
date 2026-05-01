@@ -16,5 +16,5 @@ merged = {
     "features": all_features
 }
 
-with open("./data/final/merged_buildings.geojson", "w") as f:
+with open("./data/geojsons/merged_buildings.geojson", "w") as f:
     json.dump(merged, f)
