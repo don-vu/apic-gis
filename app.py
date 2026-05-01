@@ -37,7 +37,7 @@ st.markdown("""
 def load_full_data():
     """Load the full datasets into memory once."""
     # Buildings
-    gdf = gpd.read_parquet("data/data.parquet")
+    gdf = gpd.read_parquet("./data/output/data.parquet")
     if gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326)
     else:
@@ -71,7 +71,7 @@ def load_full_data():
     center = (center_point.y, center_point.x)
     
     # Grid
-    circuit_path = "data/circuit_network.geojson"
+    circuit_path = "./data/output/circuit_network.geojson"
     circuit_gdf = None
     if os.path.exists(circuit_path):
         circuit_gdf = gpd.read_file(circuit_path)
