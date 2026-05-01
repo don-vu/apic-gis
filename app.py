@@ -20,7 +20,6 @@ ELEMENT_CONFIG = {
 }
 ELEMENT_TYPES = ["bus", "load", "sgen", "gen", "switch", "shunt", "ext_grid", "line", "trafo"]
 
-# Setup
 st.set_page_config(page_title="Solar Labs Ltd.", layout="wide")
 
 st.markdown("""
@@ -35,7 +34,6 @@ st.markdown("""
 
 @st.cache_data
 def load_full_data():
-    """Load the full datasets into memory once."""
     # Buildings
     gdf = gpd.read_parquet("./data/output/data.parquet")
     if gdf.crs is None:
@@ -50,7 +48,6 @@ def load_full_data():
     gdf['homes_powered'] = gdf['solar_potential_kwh'] / 7200
     gdf['evs_charged'] = gdf['solar_potential_kwh'] / 3040
     
-    # Simplify once for performance
     gdf['geometry'] = gdf['geometry'].simplify(0.00001, preserve_topology=True)
     
     # Tooltip
@@ -83,7 +80,6 @@ def load_full_data():
         if 'element_type' not in circuit_gdf.columns:
             circuit_gdf['element_type'] = 'line'
         
-        # Keep useful properties for tooltips
         useful_cols = [
             'geometry', 'element_type', 'name', 'vn_kv', 'p_mw', 'q_mvar', 
             'length_km', 'sn_mva', 'index', 'from_bus', 'to_bus', 
@@ -171,7 +167,6 @@ if "zoom" not in st.session_state:
     st.session_state.zoom = 18
 
 # Viewport Filtering Logic
-# We use a placeholder or the last known bounds to filter data BEFORE sending to folium
 def get_visible_data(gdf, circuit_gdf, bounds):
     if bounds is None:
         # Default view: small box around center
@@ -199,14 +194,12 @@ def get_visible_data(gdf, circuit_gdf, bounds):
         
     return visible_gdf, visible_circuit
 
-# Get bounds from st_folium (it returns the bounds of the PREVIOUS render)
 last_map_data = st.session_state.get("last_map_data", None)
 current_bounds = last_map_data.get("bounds") if last_map_data else None
 
 # Filter data for the CURRENT render
 visible_buildings, visible_grid = get_visible_data(full_gdf, full_circuit_gdf, current_bounds)
 
-# Create the map
 m = folium.Map(
     location=st.session_state.center,
     zoom_start=st.session_state.zoom,
@@ -266,7 +259,6 @@ if len(visible_buildings) > 0:
         },
     ).add_to(m)
 
-# Add layer control
 folium.LayerControl(position='bottomright', collapsed=False).add_to(m)
 
 # Render map
@@ -292,7 +284,6 @@ if map_output:
         st.session_state.last_map_data = map_output
         st.rerun()
 
-# --- Analytics for visible buildings ---
 total_buildings = len(visible_buildings)
 total_kwh = visible_buildings['solar_potential_kwh'].sum()
 total_savings = visible_buildings['money_saved'].sum()
@@ -300,7 +291,6 @@ total_co2 = visible_buildings['co2_saved_tonnes'].sum()
 total_homes = visible_buildings['homes_powered'].sum()
 total_evs = visible_buildings['evs_charged'].sum()
 
-# --- THE FINAL POLISHED LEGEND ---
 st.markdown(f'''
      <div style="
      position: fixed; top: 20px; right: 20px; width: 320px; 
