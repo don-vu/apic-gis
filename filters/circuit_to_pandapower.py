@@ -228,22 +228,33 @@ def create_network_from_csv(csv_path: str, output_path: str, max_lines: int | No
     info(f"Skipped (degenerate): {skipped:,}")
 
     stage("Create buses", f"{len(bus_coords):,} nodes")
+    # Convert bus_coords to lists for bulk creation
     bus_list = list(bus_coords.items())
-    for i, (coord, bus_id) in enumerate(bus_list):
-        if (i + 1) % max(1, len(bus_list) // 20) == 0 or (i + 1) == len(bus_list):
-            progress(i + 1, len(bus_list))
-        geo_json = json.dumps({"type": "Point", "coordinates": list(coord)})
-        pp.create_bus(net,
-                      name=f"Bus_{bus_id}",
-                      vn_kv=14.4,          # updated per line below
-                      type="b",
-                      geodata=coord,
-                      geo=geo_json)
+    coords = [c for c, _ in bus_list]
+    ids = [i for _, i in bus_list]
+    
+    # Pre-calculate geo for bulk creation
+    geos = [json.dumps({"type": "Point", "coordinates": list(c)}) for c in coords]
+    
+    pp.create_buses(net, 
+                    nr_buses=len(bus_list), 
+                    name=[f"Bus_{i}" for i in ids],
+                    vn_kv=14.4, 
+                    type="b",
+                    geodata=coords)
+    # Bulk set 'geo' column
+    net.bus['geo'] = geos
 
     # Set correct voltage per bus from line data
-    for ld in lines_data:
-        net.bus.at[ld["from_bus"], "vn_kv"] = ld["voltage_kv"]
-        net.bus.at[ld["to_bus"],   "vn_kv"] = ld["voltage_kv"]
+    # (Doing this in bulk as well)
+    from_buses = [ld["from_bus"] for ld in lines_data]
+    to_buses = [ld["to_bus"] for ld in lines_data]
+    voltages = [ld["voltage_kv"] for ld in lines_data]
+    
+    # Efficiently update bus voltages
+    bus_v_updates = pd.DataFrame({'bus': from_buses + to_buses, 'v': voltages + voltages})
+    max_v = bus_v_updates.groupby('bus')['v'].max()
+    net.bus.loc[max_v.index, 'vn_kv'] = max_v.values
 
     kv_counts = net.bus["vn_kv"].value_counts().sort_index().to_dict()
     info(f"Bus voltage distribution (kV): {kv_counts}")
@@ -251,26 +262,20 @@ def create_network_from_csv(csv_path: str, output_path: str, max_lines: int | No
     stage("Create lines", f"{len(lines_data):,} segments")
 
     def pick_std_type(service: str, phase: int) -> str:
-        """
-        Choose conductor standard type based on service type and phase.
-        3-phase → trunk feeder conductor
-        1-phase → lateral conductor
-        """
         if service.lower() == "overhead":
             return "Edmonton_OH_336ACSR" if phase == 3 else "Edmonton_OH_1_0ACSR"
         else:
             return "Edmonton_UG_500AL" if phase == 3 else "Edmonton_UG_4_0AL"
 
-    for i, ld in enumerate(lines_data):
-        if (i + 1) % max(1, len(lines_data) // 20) == 0 or (i + 1) == len(lines_data):
-            progress(i + 1, len(lines_data))
-        std_type = pick_std_type(ld["service"], ld["phase"])
-        pp.create_line(net,
-                       from_bus=ld["from_bus"],
-                       to_bus=ld["to_bus"],
-                       length_km=ld["length_km"],
-                       std_type=std_type,
-                       name=f"{ld['service']}_{ld['voltage_kv']}kV_Ph{ld['phase']}")
+    std_types = [pick_std_type(ld["service"], ld["phase"]) for ld in lines_data]
+    names = [f"{ld['service']}_{ld['voltage_kv']}kV_Ph{ld['phase']}" for ld in lines_data]
+    
+    pp.create_lines(net, 
+                    from_buses=[ld["from_bus"] for ld in lines_data],
+                    to_buses=[ld["to_bus"] for ld in lines_data],
+                    length_km=[ld["length_km"] for ld in lines_data],
+                    std_type=std_types,
+                    name=names)
 
     oh_count = sum(1 for ld in lines_data if ld["service"].lower() == "overhead")
     ug_count = len(lines_data) - oh_count
@@ -288,69 +293,86 @@ def create_network_from_csv(csv_path: str, output_path: str, max_lines: int | No
         info(f"  … and {len(islands) - 5} smaller islands")
 
     stage("Connect islands to transmission grid",
-          f"attaching {min(len(islands), 15)} substations")
+          "attaching substations proportional to island size")
 
-    # Alternate between 138 kV bulk and 72 kV distribution substations
-    for i in range(min(15, len(islands))):
-        island_buses = list(islands[i])
+    trafos_count = 0
+    # Process islands in order of size. 
+    # We need enough capacity for ~1100 MW peak load.
+    for i, island_buses_set in enumerate(islands):
+        island_buses = list(island_buses_set)
         if not island_buses:
             continue
 
-        sub_lv_bus = island_buses[0]
+        # Determine number of substations for this island based on size
+        if len(island_buses) > 15000:
+            n_subs = 30  # Very large city-scale components
+        elif len(island_buses) > 5000:
+            n_subs = 10
+        elif len(island_buses) > 1000:
+            n_subs = 3
+        elif i < 50: 
+            n_subs = 1
+        else:
+            # For small islands, only add a source if there is actually load
+            island_has_load = any(net.load.bus.isin(island_buses))
+            n_subs = 1 if island_has_load else 0
 
-        # Retrieve coordinates
-        geo_val = net.bus.at[sub_lv_bus, "geo"] if "geo" in net.bus.columns else None
-        if geo_val is None:
-            info(f"  Island {i}: no geo — skipped")
-            continue
-        try:
-            if isinstance(geo_val, str):
-                gj = json.loads(geo_val)
-                coord_x, coord_y = gj["coordinates"]
+        for j in range(n_subs):
+            # Spread substations across the island
+            sub_lv_bus = island_buses[(j * len(island_buses)) // n_subs]
+
+            # Retrieve coordinates
+            geo_val = net.bus.at[sub_lv_bus, "geo"] if "geo" in net.bus.columns else None
+            if geo_val is None:
+                continue
+            try:
+                if isinstance(geo_val, str):
+                    gj = json.loads(geo_val)
+                    coord_x, coord_y = gj["coordinates"]
+                else:
+                    coord_x, coord_y = float(geo_val[0]), float(geo_val[1])
+            except Exception:
+                continue
+
+            # Alternate substation types
+            # Bulk (138kV) for very large islands or primary connections
+            if i == 0 or (i < 5 and j % 2 == 0):
+                hv_kv    = 138.0
+                trafo_type = "Edmonton_Sub_138_25"
+                sub_label  = "138kV_Bulk"
+                vm_pu      = 1.03
             else:
-                coord_x, coord_y = float(geo_val[0]), float(geo_val[1])
-        except Exception:
-            info(f"  Island {i}: bad geo — skipped")
-            continue
+                hv_kv    = 72.0
+                trafo_type = "Edmonton_Sub_72_25"
+                sub_label  = "72kV_Dist"
+                vm_pu      = 1.02
 
-        if i < 5:
-            hv_kv    = 138.0
-            trafo_type = "Edmonton_Sub_138_25"
-            sub_label  = "138kV_Bulk"
-            vm_pu      = 1.03
-        else:
-            hv_kv    = 72.0
-            trafo_type = "Edmonton_Sub_72_25"
-            sub_label  = "72kV_Dist"
-            vm_pu      = 1.02
+            lv_kv = net.bus.at[sub_lv_bus, "vn_kv"]
 
-        lv_kv = net.bus.at[sub_lv_bus, "vn_kv"]
-
-        sub_hv_bus = pp.create_bus(
-            net,
-            name=f"Island_{i}_Sub_{sub_label}",
-            vn_kv=hv_kv,
-            type="b",
-            geodata=(coord_x, coord_y),
-            geo=json.dumps({"type": "Point", "coordinates": [coord_x, coord_y]}),
-        )
-
-        pp.create_ext_grid(net, bus=sub_hv_bus, vm_pu=vm_pu,
-                           name=f"AESO_EPCOR_Source_{i}")
-
-        # Only add transformer if LV bus is on 25 kV or 14.4 kV
-        if lv_kv <= 25.0:
-            pp.create_transformer(
+            sub_hv_bus = pp.create_bus(
                 net,
-                hv_bus=sub_hv_bus,
-                lv_bus=sub_lv_bus,
-                std_type=trafo_type,
-                name=f"Sub_Trafo_{i}_{sub_label}",
+                name=f"Island_{i}_Sub_{j}_{sub_label}",
+                vn_kv=hv_kv,
+                type="b",
+                geodata=(coord_x, coord_y),
+                geo=json.dumps({"type": "Point", "coordinates": [coord_x, coord_y]}),
             )
-            info(f"  Island {i}: {len(island_buses):,} buses → "
-                 f"{hv_kv:.0f}/{lv_kv} kV substation ({trafo_type})")
-        else:
-            info(f"  Island {i}: LV bus {lv_kv} kV — transformer skipped (voltage mismatch)")
+
+            pp.create_ext_grid(net, bus=sub_hv_bus, vm_pu=vm_pu,
+                               name=f"AESO_EPCOR_Source_{i}_{j}")
+
+            # Only add transformer if LV bus is on 25 kV or 14.4 kV
+            if lv_kv <= 25.0:
+                pp.create_transformer(
+                    net,
+                    hv_bus=sub_hv_bus,
+                    lv_bus=sub_lv_bus,
+                    std_type=trafo_type,
+                    name=f"Sub_Trafo_{i}_{j}_{sub_label}",
+                )
+                trafos_count += 1
+
+    info(f"Substations attached: {trafos_count}")
 
     info(f"External grids: {len(net.ext_grid)}")
     info(f"Transformers:   {len(net.trafo)}")
@@ -424,5 +446,10 @@ def create_network_from_csv(csv_path: str, output_path: str, max_lines: int | No
 if __name__ == "__main__":
     csv_path    = "./data/csv/Circuit_Layer_20260430.csv"
     output_path = "./data/output/circuit_network.geojson"
+    json_path   = "./data/json/circuit_network.json"
 
     net = create_network_from_csv(csv_path, output_path, max_lines=None)
+    
+    print(f"Saving network to {json_path}...")
+    pp.to_json(net, json_path)
+    print("Done.")
