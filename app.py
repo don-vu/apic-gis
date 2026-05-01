@@ -68,7 +68,11 @@ def load_full_data():
         circuit_gdf['geometry'] = circuit_gdf['geometry'].simplify(0.00005, preserve_topology=True)
         if 'element_type' not in circuit_gdf.columns:
             circuit_gdf['element_type'] = 'line'
-        circuit_gdf = circuit_gdf[['geometry', 'element_type']]
+        
+        # Keep useful properties for tooltips
+        useful_cols = ['geometry', 'element_type', 'name', 'vn_kv', 'p_mw', 'q_mvar', 'length_km', 'sn_mva', 'index']
+        cols_to_keep = [c for c in useful_cols if c in circuit_gdf.columns]
+        circuit_gdf = circuit_gdf[cols_to_keep]
 
     return gdf, circuit_gdf, center
 
@@ -127,23 +131,51 @@ m = folium.Map(
     zoom_control=True
 )
 
-# Add grid if visible
+# Grid Configuration
+ELEMENT_CONFIG = {
+    "bus": {"color": "#2979FF", "radius": 3, "label": "Buses"},
+    "load": {"color": "#FF5252", "radius": 4, "label": "Loads"},
+    "sgen": {"color": "#FFEA00", "radius": 4, "label": "Static Gen"},
+    "gen": {"color": "#FFAB40", "radius": 5, "label": "Generators"},
+    "switch": {"color": "#B0BEC5", "radius": 3, "label": "Switches"},
+    "shunt": {"color": "#7C4DFF", "radius": 4, "label": "Shunts"},
+    "ext_grid": {"color": "#00E676", "radius": 6, "label": "External Grid"},
+    "line": {"color": "#00E5FF", "weight": 3, "label": "Lines"},
+    "trafo": {"color": "#F50057", "weight": 4, "label": "Transformers"},
+}
+ELEMENT_TYPES = ["bus", "load", "sgen", "gen", "switch", "shunt", "ext_grid", "line", "trafo"]
+
+# Add grid layers
 if visible_grid is not None and len(visible_grid) > 0:
-    folium.GeoJson(
-        visible_grid,
-        name="Grid Infrastructure",
-        style_function=lambda x: {
-            "color": "#00E5FF" if x["properties"]["element_type"] == "line" else "#2979FF",
-            "weight": 3 if x["properties"]["element_type"] == "line" else 1,
-            "opacity": 0.8,
-        },
-        marker=folium.CircleMarker(radius=2, color="#2979FF", fill=True, fill_opacity=0.9)
-    ).add_to(m)
+    for etype in ELEMENT_TYPES:
+        subset = visible_grid[visible_grid['element_type'] == etype]
+        if not subset.empty:
+            config = ELEMENT_CONFIG.get(etype, {"color": "#999999", "label": etype.capitalize()})
+            fg = folium.FeatureGroup(name=config["label"]).add_to(m)
+            
+            tooltip_cols = [c for c in ['name', 'vn_kv', 'p_mw', 'q_mvar', 'length_km', 'sn_mva', 'index'] if c in subset.columns]
+            
+            folium.GeoJson(
+                subset,
+                style_function=lambda x, color=config["color"], weight=config.get("weight", 2): {
+                    "color": color,
+                    "weight": weight,
+                    "opacity": 0.8,
+                },
+                marker=folium.CircleMarker(
+                    radius=config.get("radius", 3),
+                    color=config["color"],
+                    fill=True,
+                    fill_opacity=0.9
+                ) if "radius" in config else None,
+                tooltip=folium.GeoJsonTooltip(fields=tooltip_cols) if tooltip_cols else None
+            ).add_to(fg)
 
 # Add buildings
 if len(visible_buildings) > 0:
     folium.GeoJson(
         visible_buildings[['geometry', 'tooltip_html']],
+        name="Solar Potential",
         tooltip=folium.GeoJsonTooltip(
             fields=["tooltip_html"],
             aliases=[""],
@@ -158,6 +190,9 @@ if len(visible_buildings) > 0:
             "fillOpacity": 0.5,
         },
     ).add_to(m)
+
+# Add layer control
+folium.LayerControl(position='bottomright', collapsed=False).add_to(m)
 
 # Render map
 map_output = st_folium(

@@ -103,14 +103,13 @@ def convert_network_to_geojson(input_json, output_geojson):
 
     # Add Transformers (Trafo)
     print("Processing transformers...")
-    if 'trafo' in net is not None:
+    if 'trafo' in net:
         for idx, row in net.trafo.iterrows():
             hv_bus = row['hv_bus']
             lv_bus = row['lv_bus']
             
             geometry = None
             if hv_bus in bus_coords and lv_bus in bus_coords:
-                # Transformers can be represented as lines between buses
                 geometry = {
                     "type": "LineString",
                     "coordinates": [bus_coords[hv_bus], bus_coords[lv_bus]]
@@ -118,6 +117,63 @@ def convert_network_to_geojson(input_json, output_geojson):
             
             properties = row.to_dict()
             properties['element_type'] = 'trafo'
+            properties['index'] = int(idx)
+            
+            for k, v in properties.items():
+                if isinstance(v, float) and (pd.isna(v) or v != v):
+                    properties[k] = None
+
+            if geometry:
+                features.append({
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": properties
+                })
+
+    # Add Point elements (load, gen, sgen, ext_grid, shunt)
+    for element_type in ['load', 'gen', 'sgen', 'ext_grid', 'shunt']:
+        print(f"Processing {element_type}...")
+        if element_type in net:
+            for idx, row in net[element_type].iterrows():
+                bus_idx = row['bus']
+                
+                geometry = None
+                if bus_idx in bus_coords:
+                    geometry = {
+                        "type": "Point",
+                        "coordinates": bus_coords[bus_idx]
+                    }
+                
+                properties = row.to_dict()
+                properties['element_type'] = element_type
+                properties['index'] = int(idx)
+                
+                for k, v in properties.items():
+                    if isinstance(v, float) and (pd.isna(v) or v != v):
+                        properties[k] = None
+
+                if geometry:
+                    features.append({
+                        "type": "Feature",
+                        "geometry": geometry,
+                        "properties": properties
+                    })
+
+    # Add Switch elements (Point on bus)
+    print("Processing switch...")
+    if 'switch' in net:
+        for idx, row in net.switch.iterrows():
+            bus_idx = row['bus']
+            
+            geometry = None
+            if bus_idx in bus_coords:
+                geometry = {
+                    "type": "Point",
+                    "coordinates": bus_coords[bus_idx]
+                }
+            
+            properties = row.to_dict()
+            properties['element_type'] = 'switch'
             properties['index'] = int(idx)
             
             for k, v in properties.items():
