@@ -112,28 +112,33 @@ def create_network_from_csv(csv_path: str, output_path: str, max_lines: int | No
     info("Frequency: 60 Hz  (North American standard)")
     info("Base MVA : 100 MVA")
 
+    # OH 336 ACSR
     pp.create_std_type(net, {
-        "r_ohm_per_km": 0.188,   # 336.4 ACSR (Linnet)
+        "r_ohm_per_km": 0.188,
+        "x_ohm_per_km": 0.400,
         "c_nf_per_km":  10.0,
         "max_i_ka":     0.520,
     }, name="Edmonton_OH_336ACSR", element="line")
 
+    # UG 500 AL
     pp.create_std_type(net, {
-        "r_ohm_per_km": 0.125,   # 500 kcmil AL XLPE URD
-        "x_ohm_per_km": 0.110,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.110, 
         "c_nf_per_km":  300.0,
         "max_i_ka":     0.480,
     }, name="Edmonton_UG_500AL", element="line")
 
+    # OH 1/0 ACSR
     pp.create_std_type(net, {
-        "r_ohm_per_km": 0.306,   # 1/0 ACSR
+        "r_ohm_per_km": 0.306,
         "x_ohm_per_km": 0.430,
         "c_nf_per_km":  8.0,
         "max_i_ka":     0.270,
     }, name="Edmonton_OH_1_0ACSR", element="line")
 
+    # 4/0 AL XLPE URD
     pp.create_std_type(net, {
-        "r_ohm_per_km": 0.227,   # 4/0 AL XLPE URD
+        "r_ohm_per_km": 0.227,
         "x_ohm_per_km": 0.120,
         "c_nf_per_km":  250.0,
         "max_i_ka":     0.270,
