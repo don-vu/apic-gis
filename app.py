@@ -64,8 +64,16 @@ def load_full_data():
     )
     
     # Center calculation
-    center_point = gdf.to_crs(epsg=26912).geometry.centroid.to_crs(epsg=4326).iloc[0]
-    center = (center_point.y, center_point.x)
+    if not gdf.empty:
+        try:
+            # Use the center of the bounding box for a better default view
+            bounds = gdf.total_bounds
+            center = ((bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2)
+        except Exception:
+            # Fallback to Edmonton center
+            center = (53.5461, -113.4938)
+    else:
+        center = (53.5461, -113.4938)
     
     # Grid
     circuit_path = "./data/output/circuit_network.parquet"
