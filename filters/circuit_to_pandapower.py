@@ -6,6 +6,8 @@ import pandapower.topology as top
 from shapely.geometry import LineString, MultiLineString
 from shapely.wkt import loads
 import json
+import geopandas as gpd
+from scipy.spatial import KDTree
 
 COORD_PRECISION = 5  # ~1 m at Edmonton's latitude
 _stage_start: float = 0.0
@@ -88,13 +90,15 @@ def map_voltage_kv(voltage_str: str) -> float:
         return 4.16
     return 14.4
 
-def create_network_from_csv(csv_path: str, output_path: str, max_lines: int | None = None):
+def create_network_from_csv(csv_path: str, output_path: str, buildings_path: str | None = None, max_lines: int | None = None):
     global _run_start
     _run_start = time.time()
 
     print(f"\n{'#'*60}")
     print(f"  Edmonton Distribution Network Builder")
     print(f"  Input : {csv_path}")
+    if buildings_path:
+        print(f"  Buildings: {buildings_path}")
     print(f"  Output: {output_path}")
     print(f"{'#'*60}\n")
 
@@ -382,10 +386,6 @@ def create_network_from_csv(csv_path: str, output_path: str, max_lines: int | No
     dist_buses = net.bus[net.bus["vn_kv"] <= 25.0].index.tolist()
     rng = np.random.default_rng(seed=42)
 
-    load_bus_arr = rng.choice(dist_buses,
-                              size=min(int(len(dist_buses) * 0.30), len(dist_buses)),
-                              replace=False)
-
     # Build a phase lookup from line data so we know each bus's dominant phase
     bus_phase: dict[int, int] = {}
     for ld in lines_data:
@@ -393,27 +393,91 @@ def create_network_from_csv(csv_path: str, output_path: str, max_lines: int | No
             if b not in bus_phase or ld["phase"] > bus_phase[b]:
                 bus_phase[b] = ld["phase"]
 
-    n_loads = len(load_bus_arr)
-    for i, bus_idx in enumerate(load_bus_arr):
-        if (i + 1) % max(1, n_loads // 20) == 0 or (i + 1) == n_loads:
-            progress(i + 1, n_loads)
+    if buildings_path:
+        info(f"Assigning loads based on buildings: {buildings_path}")
+        try:
+            bld_gdf = gpd.read_file(buildings_path)
+            
+            # Get centroids in projected CRS (EPSG:3776) for accuracy
+            bld_gdf['centroid'] = bld_gdf.geometry.centroid
+            
+            # Reproject to WGS84
+            if bld_gdf.crs != "EPSG:4326":
+                info(f"Reprojecting buildings from {bld_gdf.crs} to EPSG:4326")
+                # Reproject both geometry and centroid
+                bld_gdf = bld_gdf.to_crs("EPSG:4326")
+                bld_gdf['centroid'] = bld_gdf['centroid'].to_crs("EPSG:4326")
+            
+            # Get coordinates
+            bld_coords = np.array([[c.x, c.y] for c in bld_gdf['centroid']])
+            
+            # Get distribution bus coordinates
+            dist_bus_ids = dist_buses
+            # Mapping from bus_id to its (lon, lat) from the original bus_coords dict
+            id_to_coords = {v: k for k, v in bus_coords.items()}
+            bus_points = np.array([id_to_coords[b] for b in dist_bus_ids])
+            
+            # Build KDTree and query
+            tree = KDTree(bus_points)
+            dist, indices = tree.query(bld_coords)
+            
+            # Aggregate area by bus
+            bus_area = {}
+            for i, bus_idx_in_list in enumerate(indices):
+                bus_id = dist_bus_ids[bus_idx_in_list]
+                area = bld_gdf.iloc[i].get('area', 100.0) # Default if missing
+                bus_area[bus_id] = bus_area.get(bus_id, 0) + area
+            
+            info(f"Mapped {len(bld_gdf)} buildings to {len(bus_area)} buses.")
+            
+            # Heuristic: 100 W/m^2 = 0.0001 MW/m^2
+            MW_PER_M2 = 0.0001 
+            # We might want to scale up if we only have a subset of buildings
+            # to reach Edmonton's typical peak.
+            # Total area is ~740,000 m^2. 740,000 * 0.0001 = 74 MW.
+            # To reach ~1100 MW, we'd need a factor of ~15x.
+            SCALING_FACTOR = 15.0 
+            
+            for bus_id, area in bus_area.items():
+                ph = bus_phase.get(int(bus_id), 1)
+                p_mw = area * MW_PER_M2 * SCALING_FACTOR
+                load_type = "commercial" if area > 1000 or ph == 3 else "residential"
+                
+                pp.create_load(net,
+                               bus=bus_id,
+                               p_mw=float(p_mw),
+                               q_mvar=float(p_mw * 0.22),
+                               name=f"{load_type}_Load_{bus_id}")
+        except Exception as e:
+            info(f"Error processing buildings: {e}. Falling back to random loads.")
+            buildings_path = None
 
-        ph = bus_phase.get(int(bus_idx), 1)
+    if not buildings_path:
+        load_bus_arr = rng.choice(dist_buses,
+                                  size=min(int(len(dist_buses) * 0.30), len(dist_buses)),
+                                  replace=False)
 
-        if ph == 3:
-            # Commercial / industrial: median 40 kW, heavy tail
-            p_mw = float(np.clip(rng.lognormal(np.log(0.040), 1.1), 0.005, 2.0))
-            load_type = "commercial"
-        else:
-            # Residential: median 10 kW, tighter spread
-            p_mw = float(np.clip(rng.lognormal(np.log(0.010), 0.70), 0.002, 0.100))
-            load_type = "residential"
+        n_loads = len(load_bus_arr)
+        for i, bus_idx in enumerate(load_bus_arr):
+            if (i + 1) % max(1, n_loads // 20) == 0 or (i + 1) == n_loads:
+                progress(i + 1, n_loads)
 
-        pp.create_load(net,
-                       bus=bus_idx,
-                       p_mw=p_mw,
-                       q_mvar=p_mw * 0.22,   # PF ≈ 0.977 (typical Edmonton mix)
-                       name=f"{load_type}_Load_{bus_idx}")
+            ph = bus_phase.get(int(bus_idx), 1)
+
+            if ph == 3:
+                # Commercial / industrial: median 40 kW, heavy tail
+                p_mw = float(np.clip(rng.lognormal(np.log(0.040), 1.1), 0.005, 2.0))
+                load_type = "commercial"
+            else:
+                # Residential: median 10 kW, tighter spread
+                p_mw = float(np.clip(rng.lognormal(np.log(0.010), 0.70), 0.002, 0.100))
+                load_type = "residential"
+
+            pp.create_load(net,
+                           bus=bus_idx,
+                           p_mw=p_mw,
+                           q_mvar=p_mw * 0.22,   # PF ≈ 0.977 (typical Edmonton mix)
+                           name=f"{load_type}_Load_{bus_idx}")
 
     total_p = net.load["p_mw"].sum()
     info(f"Loads created:  {len(net.load):,}")
@@ -445,10 +509,11 @@ def create_network_from_csv(csv_path: str, output_path: str, max_lines: int | No
 
 if __name__ == "__main__":
     csv_path    = "./data/csv/Circuit_Layer_20260430.csv"
+    buildings_path = "./data/geojsons/merged_buildings.geojson"
     output_path = "./data/output/circuit_network.geojson"
     json_path   = "./data/json/circuit_network.json"
 
-    net = create_network_from_csv(csv_path, output_path, max_lines=None)
+    net = create_network_from_csv(csv_path, output_path, buildings_path=buildings_path, max_lines=None)
     
     print(f"Saving network to {json_path}...")
     pp.to_json(net, json_path)
