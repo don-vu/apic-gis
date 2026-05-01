@@ -71,10 +71,10 @@ def load_full_data():
     center = (center_point.y, center_point.x)
     
     # Grid
-    circuit_path = "./data/output/circuit_network.geojson"
+    circuit_path = "./data/output/circuit_network.parquet"
     circuit_gdf = None
     if os.path.exists(circuit_path):
-        circuit_gdf = gpd.read_file(circuit_path)
+        circuit_gdf = gpd.read_parquet(circuit_path)
         if circuit_gdf.crs is None:
             circuit_gdf = circuit_gdf.set_crs(epsg=4326)
         else:
