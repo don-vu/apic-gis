@@ -292,18 +292,38 @@ if visible_grid is not None and len(visible_grid) > 0:
             config = ELEMENT_CONFIG.get(etype, {"color": "#999999", "label": etype.capitalize()})
             fg = folium.FeatureGroup(name=config["label"]).add_to(m)
             
-            folium.GeoJson(
-                subset[['geometry', 'tooltip_html']],
-                style_function=lambda x, color=config["color"], weight=config.get("weight", 2): {
+            def style_fn(feature):
+                props = feature['properties']
+                loading = props.get('loading_percent', 0)
+                if loading is None or (isinstance(loading, float) and pd.isna(loading)):
+                    loading = 0
+                
+                color = config.get("color", "#2979FF")
+                weight = config.get("weight", 2)
+                
+                if etype == 'line':
+                    if loading > 100: color = "#FF1744" # Vivid Red
+                    elif loading > 80: color = "#FFFF00" # Bright Yellow
+                    elif loading > 30: color = "#00FF00" # Bright Green
+                    else: color = "#00E5FF"              # Cyan
+                    weight = 4 + (loading / 20.0) # Thicker base and more aggressive scaling
+                elif etype == 'trafo' and loading > 100:
+                    color = "#FF1744"
+                
+                return {
                     "color": color,
                     "weight": weight,
-                    "opacity": 0.8,
-                },
+                    "opacity": 0.9, # Higher opacity for lines
+                }
+
+            folium.GeoJson(
+                subset,
+                style_function=style_fn,
                 marker=folium.CircleMarker(
-                    radius=config.get("radius", 3),
+                    radius=config.get("radius", 3) + 1, # Slightly larger markers
                     color=config["color"],
                     fill=True,
-                    fill_opacity=0.9
+                    fill_opacity=1.0
                 ) if "radius" in config else None,
                 tooltip=folium.GeoJsonTooltip(
                     fields=["tooltip_html"],
@@ -313,6 +333,27 @@ if visible_grid is not None and len(visible_grid) > 0:
                     max_width=300
                 )
             ).add_to(fg)
+            
+            # Power Labels for lines
+            if etype == "line" and st.session_state.zoom >= 17:
+                for _, row in subset.iterrows():
+                    if row.geometry.geom_type == 'LineString':
+                        midpoint = row.geometry.interpolate(0.5, normalized=True)
+                        p_kw = abs(row.get('p_from_mw', 0)) * 1000
+                        ld = row.get('loading_percent', 0)
+                        if p_kw > 0.1: # Show even small flows
+                            folium.Marker(
+                                location=[midpoint.y, midpoint.x],
+                                icon=folium.DivIcon(
+                                    html=f"""<div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                                             font-size: 11px; font-weight: bold; color: white; 
+                                             background: rgba(0,0,0,0.8); padding: 2px 6px; border-radius: 4px;
+                                             white-space: nowrap; border: 1px solid rgba(255,255,255,0.4);
+                                             box-shadow: 0px 2px 4px rgba(0,0,0,0.5); transform: translate(-50%, -50%);">
+                                             {p_kw:,.0f} kW | {ld:.1f}%
+                                             </div>"""
+                                )
+                            ).add_to(fg)
 
 # Add buildings
 if len(visible_buildings) > 0:
@@ -327,10 +368,10 @@ if len(visible_buildings) > 0:
             max_width=300
         ),
         style_function=lambda x: {
-            "fillColor": "#FFB300",
-            "color": "#FF8F00",
-            "weight": 2,
-            "fillOpacity": 0.5,
+            "fillColor": "#FFD54F",
+            "color": "#FFA000",
+            "weight": 1,
+            "fillOpacity": 0.2, # Much more transparent to emphasize the grid
         },
     ).add_to(m)
 
