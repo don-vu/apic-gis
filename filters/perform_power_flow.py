@@ -65,6 +65,8 @@ def run_power_flow(json_path):
             all_res_line = []
             all_res_trafo = []
             all_res_bus = []
+            all_res_load = []
+            all_res_ext_grid = []
             
             converged_islands = 0
             for i in islands_with_ext_grid:
@@ -72,36 +74,20 @@ def run_power_flow(json_path):
                 net.bus['in_service'] = False
                 net.bus.loc[net.bus.index.isin(island_buses), 'in_service'] = True
                 
-                # Also ensure lines/trafos/loads connected to these buses are in service
-                # Pandapower usually handles this if buses are out of service, but let's be explicit
-                
                 try:
                     pp.runpp(net, algorithm='nr', max_iteration=100, numba=False)
                     print(f"  Island {i} ({len(island_buses)} buses) converged.")
                     converged_islands += 1
                     
-                    # Store results, dropping rows that are not in this island
+                    # Store results
                     all_res_line.append(net.res_line.dropna(subset=['loading_percent']))
                     all_res_trafo.append(net.res_trafo.dropna(subset=['loading_percent']))
                     all_res_bus.append(net.res_bus.dropna(subset=['vm_pu']))
+                    all_res_load.append(net.res_load.dropna(subset=['p_mw']))
+                    all_res_ext_grid.append(net.res_ext_grid.dropna(subset=['p_mw']))
                     success = True 
                 except Exception as e:
                     print(f"  Island {i} ({len(island_buses)} buses) failed to converge: {e}")
-                    if len(island_buses) > 1000:
-                        print("  Performing diagnostics on this large island...")
-                        # Check for loops
-                        import networkx as nx
-                        # Convert MultiGraph to Graph for cycle_basis
-                        simple_sub_mg = nx.Graph(mg.subgraph(island_buses))
-                        if not nx.is_tree(simple_sub_mg):
-                            cycles = nx.cycle_basis(simple_sub_mg)
-                            print(f"    Island has {len(cycles)} cycles. (Not strictly radial)")
-                        else:
-                            print("    Island is strictly radial (a tree).")
-                        
-                        # Check for multiple ext_grids
-                        island_ext_grids = net.ext_grid[net.ext_grid.bus.isin(island_buses)]
-                        print(f"    Island has {len(island_ext_grids)} external grids.")
 
             if success:
                 print(f"\nSuccessfully converged {converged_islands} islands out of {len(islands_with_ext_grid)}.")
@@ -109,11 +95,15 @@ def run_power_flow(json_path):
                 net.res_line = pd.concat(all_res_line).sort_index() if all_res_line else pd.DataFrame()
                 net.res_trafo = pd.concat(all_res_trafo).sort_index() if all_res_trafo else pd.DataFrame()
                 net.res_bus = pd.concat(all_res_bus).sort_index() if all_res_bus else pd.DataFrame()
+                net.res_load = pd.concat(all_res_load).sort_index() if all_res_load else pd.DataFrame()
+                net.res_ext_grid = pd.concat(all_res_ext_grid).sort_index() if all_res_ext_grid else pd.DataFrame()
                 
-                # Ensure we only have unique indices (in case of overlap, though there shouldn't be any)
+                # Ensure we only have unique indices
                 net.res_line = net.res_line[~net.res_line.index.duplicated(keep='first')]
                 net.res_trafo = net.res_trafo[~net.res_trafo.index.duplicated(keep='first')]
                 net.res_bus = net.res_bus[~net.res_bus.index.duplicated(keep='first')]
+                net.res_load = net.res_load[~net.res_load.index.duplicated(keep='first')]
+                net.res_ext_grid = net.res_ext_grid[~net.res_ext_grid.index.duplicated(keep='first')]
         else:
             print("No islands have external grids! Cannot run power flow.")
             return
@@ -144,13 +134,40 @@ def run_power_flow(json_path):
         # Top transformers
         top_trafos = net.trafo.iloc[trafo_loading.sort_values(ascending=False).index]
         top_trafos_loadings = trafo_loading.sort_values(ascending=False)
-        print("\nTransformer Loadings:")
-        for idx, row in top_trafos.iterrows():
+        print("\nTop 10 Transformer Loadings:")
+        for idx, row in top_trafos.head(10).iterrows():
             print(f"  Trafo {idx} ({row['name']}): {top_trafos_loadings[idx]:.2f}%")
 
-    # Overall loss
-    p_loss_mw = net.res_line.p_from_mw.sum() - net.res_line.p_to_mw.sum() + net.res_trafo.p_hv_mw.sum() - net.res_trafo.p_lv_mw.sum()
-    print(f"\nTotal Network Losses: {p_loss_mw:.4f} MW")
+    if hasattr(net, 'res_bus') and not net.res_bus.empty:
+        vm_pu = net.res_bus.vm_pu
+        print(f"\nBus Voltage Statistics:")
+        print(f"  Min Voltage: {vm_pu.min():.4f} pu")
+        print(f"  Max Voltage: {vm_pu.max():.4f} pu")
+        print(f"  Mean Voltage: {vm_pu.mean():.4f} pu")
+        print(f"  Buses < 0.95 pu: {len(vm_pu[vm_pu < 0.95])}")
+        print(f"  Buses > 1.05 pu: {len(vm_pu[vm_pu > 1.05])}")
+
+    # Overall summary
+    total_served_load_mw = net.res_load.p_mw.sum() if hasattr(net, 'res_load') else 0
+    total_configured_load_mw = net.load.p_mw.sum()
+    total_gen_mw = net.res_ext_grid.p_mw.sum() if hasattr(net, 'res_ext_grid') else 0
+    
+    # Active power loss is the sum of P at all ports of branches (since P into branch is positive)
+    line_loss = (net.res_line.p_from_mw + net.res_line.p_to_mw).sum() if hasattr(net, 'res_line') else 0
+    trafo_loss = (net.res_trafo.p_hv_mw + net.res_trafo.p_lv_mw).sum() if hasattr(net, 'res_trafo') else 0
+    total_loss_mw = line_loss + trafo_loss
+
+    print(f"\nNetwork Summary Statistics:")
+    print(f"  Total Configured Load: {total_configured_load_mw * 1000:.2f} kW")
+    print(f"  Total Served Load:     {total_served_load_mw * 1000:.2f} kW ({total_served_load_mw/total_configured_load_mw*100:.2f}%)")
+    print(f"  Total Generation:      {total_gen_mw * 1000:.2f} kW")
+    print(f"  Total Network Loss:    {total_loss_mw * 1000:.4f} kW ({total_loss_mw/total_served_load_mw*100:.2f}% of served load if > 0 else 0)")
+
+    # Save results back to JSON
+    if success:
+        print(f"\nSaving results to {json_path}...")
+        pp.to_json(net, json_path)
+        print("Done.")
 
 if __name__ == "__main__":
     path = "./data/json/circuit_network.json"

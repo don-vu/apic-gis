@@ -1,7 +1,7 @@
 import geopandas as gpd
 
-gdf = gpd.read_file("./data/geojsons/merged_buildings.geojson")
+gdf = gpd.read_file("./data/geojson/merged_buildings.geojson")
 gdf.to_parquet("./data/output/merged_buildings.parquet", index=False)
 
-gdf = gpd.read_file("./data/geojsons/circuit_network.geojson")
+gdf = gpd.read_file("./data/geojson/circuit_network.geojson")
 gdf.to_parquet("./data/output/circuit_network.parquet", index=False)

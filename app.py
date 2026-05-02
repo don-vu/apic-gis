@@ -82,7 +82,8 @@ def load_full_data():
 
     # Calculations: area * utilization (70%) * efficiency (20%) * yield (kWh/kWp)
     # 0.7 * 0.2 = 0.14 kWp/m2
-    gdf['solar_potential_kwh'] = gdf['area'] * 0.14 * pvgis_yield
+    gdf['peak_kwp'] = gdf['area'] * 0.14
+    gdf['solar_potential_kwh'] = gdf['peak_kwp'] * pvgis_yield
     gdf['money_saved'] = gdf['solar_potential_kwh'] * 0.15
     gdf['co2_saved_tonnes'] = (gdf['solar_potential_kwh'] * 0.424) / 1000
     gdf['homes_powered'] = gdf['solar_potential_kwh'] / 7200
@@ -96,6 +97,7 @@ def load_full_data():
         <div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>
             <h4 style='margin-top: 0; color: #FF9F00;'>Building #{row.building_id}</h4>
             <b>Roof Area:</b> {row.area:,.0f} m²<br>
+            <b>Peak Solar:</b> {row.peak_kwp:,.1f} kWp<br>
             <b>Energy Potential:</b> {row.solar_potential_kwh:,.0f} kWh/yr<br>
             <b>Est. Savings:</b> <span style='color: green;'>${row.money_saved:,.0f}/yr</span>
             <hr style='margin: 8px 0; border: 0; border-top: 1px solid #eee;'>
@@ -121,7 +123,10 @@ def load_full_data():
         useful_cols = [
             'geometry', 'element_type', 'name', 'vn_kv', 'p_mw', 'q_mvar', 
             'length_km', 'sn_mva', 'index', 'from_bus', 'to_bus', 
-            'r_ohm_per_km', 'x_ohm_per_km', 'c_nf_per_km', 'g_us_per_km', 'bus'
+            'r_ohm_per_km', 'x_ohm_per_km', 'c_nf_per_km', 'g_us_per_km', 'bus',
+            'p_from_mw', 'q_from_mvar', 'p_to_mw', 'q_to_mvar', 'loading_percent', 
+            'vm_pu', 'va_degree', 'p_hv_mw', 'q_hv_mvar', 'p_lv_mw', 'q_lv_mvar',
+            'hv_bus', 'lv_bus', 'i_ka', 'i_from_ka', 'i_to_ka'
         ]
         cols_to_keep = [c for c in useful_cols if c in circuit_gdf.columns]
         
@@ -141,30 +146,43 @@ def load_full_data():
                     'from_bus': 'From Bus',
                     'to_bus': 'To Bus',
                     'length_km': 'Length (km)',
-                    'r_ohm_per_km': 'R (Ohm/km)',
-                    'x_ohm_per_km': 'X (Ohm/km)',
-                    'c_nf_per_km': 'C (nF/km)'
+                    'loading_percent': 'Loading (%)',
+                    'p_from_mw': 'P (kW)',
+                    'q_from_mvar': 'Q (kVAR)',
+                    'i_ka': 'Current (A)'
+                }
+            elif etype == "trafo":
+                field_labels = {
+                    'name': 'Name',
+                    'hv_bus': 'HV Bus',
+                    'lv_bus': 'LV Bus',
+                    'loading_percent': 'Loading (%)',
+                    'p_hv_mw': 'P HV (kW)',
+                    'q_hv_mvar': 'Q HV (kVAR)',
+                    'sn_mva': 'Rating (MVA)'
                 }
             elif etype == "load":
                 field_labels = {
                     'name': 'Name',
                     'bus': 'Bus',
-                    'p_mw': 'Active Power (MW)',
-                    'q_mvar': 'Reactive Power (MVAR)'
+                    'p_mw': 'P (kW)',
+                    'q_mvar': 'Q (kVAR)'
                 }
             elif etype == "bus":
                 field_labels = {
                     'name': 'Name',
-                    'vn_kv': 'Voltage (kV)'
+                    'vn_kv': 'Nominal Voltage (kV)',
+                    'vm_pu': 'Voltage (pu)',
+                    'va_degree': 'Angle (deg)'
                 }
             else:
                 field_labels = {
                     'name': 'Name',
                     'vn_kv': 'Voltage (kV)',
-                    'p_mw': 'Active Power (MW)',
-                    'q_mvar': 'Reactive Power (MVAR)',
-                    'length_km': 'Length (km)',
-                    'sn_mva': 'Rated Power (MVA)',
+                    'p_mw': 'P (kW)',
+                    'q_mvar': 'Q (kVAR)',
+                    'loading_percent': 'Loading (%)',
+                    'vm_pu': 'Voltage (pu)',
                     'index': 'ID'
                 }
             
@@ -176,8 +194,25 @@ def load_full_data():
                     if isinstance(val, (int, float)) and pd.isna(val):
                         continue
                     
+                    # Convert MW/MVAR to kW/kVAR and use absolute magnitude for intuitive display
+                    if any(suffix in col for suffix in ['_mw', '_mvar']):
+                        val = abs(val) * 1000
+                    
+                    # Convert kA to A
+                    if '_ka' in col or col == 'i_ka':
+                        val = abs(val) * 1000
+
+                    # Highlight overloads
+                    if col == 'loading_percent':
+                        if val > 100:
+                            html += f"<b>{label}:</b> <span style='color: #FF5252;'>{val:,.1f}% (OVERLOAD)</span><br>"
+                        else:
+                            html += f"<b>{label}:</b> {val:,.1f}%<br>"
+                    # Highlight low voltage
+                    elif col == 'vm_pu' and val < 0.95:
+                        html += f"<b>{label}:</b> <span style='color: #FF5252;'>{val:,.3f} pu (LOW)</span><br>"
                     # Format IDs/Buses as integers with no commas
-                    if col in ['from_bus', 'to_bus', 'bus', 'index']:
+                    elif col in ['from_bus', 'to_bus', 'bus', 'index', 'hv_bus', 'lv_bus']:
                         try:
                             html += f"<b>{label}:</b> {int(float(val))}<br>"
                         except (ValueError, TypeError):
@@ -216,11 +251,13 @@ def get_visible_data(gdf, circuit_gdf, bounds):
         ne = bounds["_northEast"]
         view_box = box(sw["lng"], sw["lat"], ne["lng"], ne["lat"])
     
-    # Filter buildings
-    spatial_index = gdf.sindex
-    possible_indices = list(spatial_index.intersection(view_box.bounds))
-    visible_gdf = gdf.iloc[possible_indices].copy()
-    visible_gdf = visible_gdf[visible_gdf.geometry.intersects(view_box)]
+    # Filter buildings (only if zoomed in)
+    visible_gdf = gdf.iloc[:0].copy()
+    if st.session_state.zoom >= 16:
+        spatial_index = gdf.sindex
+        possible_indices = list(spatial_index.intersection(view_box.bounds))
+        visible_gdf = gdf.iloc[possible_indices].copy()
+        visible_gdf = visible_gdf[visible_gdf.geometry.intersects(view_box)]
     
     # Filter circuit (only if zoomed in)
     visible_circuit = None
@@ -329,6 +366,36 @@ total_co2 = visible_buildings['co2_saved_tonnes'].sum()
 total_homes = visible_buildings['homes_powered'].sum()
 total_evs = visible_buildings['evs_charged'].sum()
 
+# Grid Analytics
+max_loading = 0
+min_voltage = 1.0
+overloads = 0
+low_voltages = 0
+total_demand_kw = 0
+total_gen_kw = 0
+
+if visible_grid is not None and not visible_grid.empty:
+    if 'loading_percent' in visible_grid.columns:
+        valid_loading = visible_grid['loading_percent'].dropna()
+        if not valid_loading.empty:
+            max_loading = valid_loading.max()
+            overloads = len(valid_loading[valid_loading > 100])
+    
+    if 'vm_pu' in visible_grid.columns:
+        valid_v = visible_grid['vm_pu'].dropna()
+        if not valid_v.empty:
+            min_voltage = valid_v.min()
+            low_voltages = len(valid_v[valid_v < 0.95])
+            
+    # Calculate Totals
+    loads = visible_grid[visible_grid['element_type'] == 'load']
+    if not loads.empty and 'p_mw' in loads.columns:
+        total_demand_kw = loads['p_mw'].sum() * 1000
+    
+    gens = visible_grid[visible_grid['element_type'].isin(['sgen', 'gen', 'ext_grid'])]
+    if not gens.empty and 'p_mw' in gens.columns:
+        total_gen_kw = gens['p_mw'].sum() * 1000
+
 st.markdown(f'''
      <div style="
      position: fixed; top: 20px; right: 20px; width: 320px; 
@@ -342,7 +409,7 @@ st.markdown(f'''
          Live Screen Analytics
          <span style="font-size: 10px; color: #888; text-transform: none; float: right; font-weight: normal;">Powered by PVGIS</span>
      </h4>
-     
+     {f'<div style="color: #FF5252; font-size: 12px; font-weight: 600; margin-bottom: 8px;">⚠️ Zoom in to see buildings & grid</div>' if st.session_state.zoom < 16 else ''}
      <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
          <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Buildings Detected:</span>
          <span style="font-size: 18px; font-weight: 700; color: #1a1a1a;">{total_buildings}</span>
@@ -358,6 +425,30 @@ st.markdown(f'''
          <span style="font-size: 18px; font-weight: 700; color: #10B981;">${total_savings:,.0f}<span style="font-size: 12px;">/yr</span></span>
      </div>
      
+     <h4 style="color: #111; margin: 0 0 4px 0; font-size: 15px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;">
+         Grid Health (Simulation)
+     </h4>
+     <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
+         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Total Demand:</span>
+         <span style="font-size: 18px; font-weight: 700; color: #1a1a1a;">{total_demand_kw:,.0f} <span style="font-size: 12px;">kW</span></span>
+     </div>
+     <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
+         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Total Generation:</span>
+         <span style="font-size: 18px; font-weight: 700; color: #10B981;">{total_gen_kw:,.0f} <span style="font-size: 12px;">kW</span></span>
+     </div>
+     <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
+         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Max Loading:</span>
+         <span style="font-size: 18px; font-weight: 700; color: {'#FF5252' if max_loading > 100 else '#10B981'};">{max_loading:,.1f}%</span>
+     </div>
+     <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
+         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Min Voltage:</span>
+         <span style="font-size: 18px; font-weight: 700; color: {'#FF5252' if min_voltage < 0.95 else '#10B981'};">{min_voltage:,.3f} <span style="font-size: 12px;">pu</span></span>
+     </div>
+     <div style="display: flex; align-items: baseline; margin-bottom: 12px; border-bottom: 1px solid #f0f0f0; padding-bottom: 12px;">
+         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Violations:</span>
+         <span style="font-size: 18px; font-weight: 700; color: {'#FF5252' if (overloads + low_voltages) > 0 else '#10B981'};">{overloads + low_voltages}</span>
+     </div>
+
      <h4 style="color: #111; margin: 0 0 4px 0; font-size: 15px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;">
          Environmental Impact
      </h4>

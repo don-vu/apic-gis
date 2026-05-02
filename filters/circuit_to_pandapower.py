@@ -153,27 +153,27 @@ def create_network_from_csv(csv_path: str, output_path: str, buildings_path: str
     pp.create_std_type(net, {
         "sn_mva":          50.0,
         "vn_hv_kv":       138.0,
-        "vn_lv_kv":        25.0,
+        "vn_lv_kv":        14.4,
         "vk_percent":      12.0,
         "vkr_percent":      0.35,
         "pfe_kw":          35.0,
         "i0_percent":       0.06,
         "shift_degree":    30.0,
-    }, name="Edmonton_Sub_138_25", element="trafo")
+    }, name="Edmonton_Sub_138_14", element="trafo")
 
-    # Distribution: 72 kV → 25 kV 
+    # Distribution: 72 kV → 14.4 kV 
     pp.create_std_type(net, {
         "sn_mva":          25.0,
         "vn_hv_kv":        72.0,
-        "vn_lv_kv":        25.0,
+        "vn_lv_kv":        14.4,
         "vk_percent":      12.5,
         "vkr_percent":      0.40,
         "pfe_kw":          15.0,
         "i0_percent":       0.08,
         "shift_degree":    30.0,
-    }, name="Edmonton_Sub_72_25", element="trafo")
+    }, name="Edmonton_Sub_72_14", element="trafo")
 
-    info("Standard types registered (OH/UG lines, 138/25 kV and 72/25 kV transformers)")
+    info("Standard types registered (OH/UG lines, 138/14.4 kV and 72/14.4 kV transformers)")
 
     stage("Parse geometry", f"{len(df):,} rows")
     bus_coords: dict[tuple, int] = {}
@@ -342,12 +342,12 @@ def create_network_from_csv(csv_path: str, output_path: str, buildings_path: str
             # Bulk (138kV) for very large islands or primary connections
             if i == 0 or (i < 5 and j % 2 == 0):
                 hv_kv    = 138.0
-                trafo_type = "Edmonton_Sub_138_25"
+                trafo_type = "Edmonton_Sub_138_14"
                 sub_label  = "138kV_Bulk"
                 vm_pu      = 1.03
             else:
                 hv_kv    = 72.0
-                trafo_type = "Edmonton_Sub_72_25"
+                trafo_type = "Edmonton_Sub_72_14"
                 sub_label  = "72kV_Dist"
                 vm_pu      = 1.02
 
@@ -430,23 +430,24 @@ def create_network_from_csv(csv_path: str, output_path: str, buildings_path: str
             
             info(f"Mapped {len(bld_gdf)} buildings to {len(bus_area)} buses.")
             
-            # Heuristic: 100 W/m^2 = 0.0001 MW/m^2
-            MW_PER_M2 = 0.0001 
-            # We might want to scale up if we only have a subset of buildings
-            # to reach Edmonton's typical peak.
-            # Total area is ~740,000 m^2. 740,000 * 0.0001 = 74 MW.
-            # To reach ~1100 MW, we'd need a factor of ~15x.
-            SCALING_FACTOR = 15.0 
+            # Target total peak demand for Edmonton is ~1100 MW
+            TARGET_PEAK_MW = 1100.0
+            total_area = sum(bus_area.values())
+            mw_per_m2 = TARGET_PEAK_MW / total_area
+            
+            info(f"Total building area: {total_area:,.2f} m^2")
+            info(f"Calculated power density: {mw_per_m2 * 1e6:.2f} W/m^2 to reach {TARGET_PEAK_MW} MW")
             
             for bus_id, area in bus_area.items():
                 ph = bus_phase.get(int(bus_id), 1)
-                p_mw = area * MW_PER_M2 * SCALING_FACTOR
+                p_mw = area * mw_per_m2
+                # Distinguish load type for naming/analysis
                 load_type = "commercial" if area > 1000 or ph == 3 else "residential"
                 
                 pp.create_load(net,
                                bus=bus_id,
                                p_mw=float(p_mw),
-                               q_mvar=float(p_mw * 0.22),
+                               q_mvar=float(p_mw * 0.22), # PF ≈ 0.977
                                name=f"{load_type}_Load_{bus_id}")
         except Exception as e:
             info(f"Error processing buildings: {e}. Falling back to random loads.")
@@ -495,9 +496,9 @@ def create_network_from_csv(csv_path: str, output_path: str, buildings_path: str
     print(f"  Buses        : {len(net.bus):,}")
     print(f"  Lines        : {len(net.line):,}")
     print(f"  Loads        : {len(net.load):,}")
-    print(f"  Load (MW)    : {net.load['p_mw'].sum():.2f}")
+    print(f"  Load (kW)    : {net.load['p_mw'].sum() * 1000:.2f}")
     print(f"  Solar SGen   : {len(net.sgen):,}")
-    print(f"  Solar (MW)   : {net.sgen['p_mw'].sum():.2f}")
+    print(f"  Solar (kW)   : {net.sgen['p_mw'].sum() * 1000:.2f}")
     print(f"  Transformers : {len(net.trafo):,}")
     print(f"  Ext grids    : {len(net.ext_grid):,}")
     print(f"  Switches     : {len(net.switch):,}")
@@ -509,7 +510,7 @@ def create_network_from_csv(csv_path: str, output_path: str, buildings_path: str
 
 if __name__ == "__main__":
     csv_path    = "./data/csv/Circuit_Layer_20260430.csv"
-    buildings_path = "./data/geojsons/merged_buildings.geojson"
+    buildings_path = "./data/geojson/merged_buildings.geojson"
     output_path = "./data/output/circuit_network.geojson"
     json_path   = "./data/json/circuit_network.json"
 

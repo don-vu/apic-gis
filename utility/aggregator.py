@@ -1,7 +1,7 @@
 import json
 import os
 
-folder = "./data/geojsons"
+folder = "./data/geojson"
 
 all_features = []
 merged_crs = None
@@ -22,5 +22,5 @@ merged = {
 if merged_crs:
     merged["crs"] = merged_crs
 
-with open("./data/geojsons/merged_buildings.geojson", "w") as f:
+with open("./data/geojson/merged_buildings.geojson", "w") as f:
     json.dump(merged, f)

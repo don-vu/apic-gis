@@ -43,6 +43,12 @@ def convert_network_to_geojson(input_json, output_geojson):
                     print(f"Warning: Could not parse geo for bus {idx}: {e}")
 
             properties = row.drop('geo').to_dict() if has_geo else row.to_dict()
+            
+            # Merge results if they exist
+            if 'res_bus' in net and idx in net.res_bus.index:
+                res = net.res_bus.loc[idx].to_dict()
+                properties.update(res)
+
             properties['element_type'] = 'bus'
             properties['index'] = int(idx)
             
@@ -87,6 +93,12 @@ def convert_network_to_geojson(input_json, output_geojson):
                     }
 
             properties = row.drop('geo').to_dict() if has_geo else row.to_dict()
+            
+            # Merge results if they exist
+            if 'res_line' in net and idx in net.res_line.index:
+                res = net.res_line.loc[idx].to_dict()
+                properties.update(res)
+
             properties['element_type'] = 'line'
             properties['index'] = int(idx)
             
@@ -116,6 +128,12 @@ def convert_network_to_geojson(input_json, output_geojson):
                 }
             
             properties = row.to_dict()
+            
+            # Merge results if they exist
+            if 'res_trafo' in net and idx in net.res_trafo.index:
+                res = net.res_trafo.loc[idx].to_dict()
+                properties.update(res)
+
             properties['element_type'] = 'trafo'
             properties['index'] = int(idx)
             
@@ -145,6 +163,13 @@ def convert_network_to_geojson(input_json, output_geojson):
                     }
                 
                 properties = row.to_dict()
+                
+                # Merge results if they exist
+                res_table = f'res_{element_type}'
+                if res_table in net and idx in net[res_table].index:
+                    res = net[res_table].loc[idx].to_dict()
+                    properties.update(res)
+
                 properties['element_type'] = element_type
                 properties['index'] = int(idx)
                 
@@ -202,7 +227,7 @@ def convert_network_to_geojson(input_json, output_geojson):
 
 if __name__ == "__main__":
     input_file = "./data/json/circuit_network.json"
-    output_file = "./data/geojsons/circuit_network.geojson"
+    output_file = "./data/geojson/circuit_network.geojson"
     
     if len(sys.argv) > 1:
         input_file = sys.argv[1]
