@@ -69,8 +69,9 @@ def run_simulation(selected_bids, buildings_gdf):
     # Work on a deep copy to avoid modifying the cached base_net
     net = copy.deepcopy(base_net)
     
-    # Add sgens for each selected building
+    # Add sgens for each selected building and track solar per bus
     selected_data = buildings_gdf[buildings_gdf['unique_id'].isin(selected_bids)]
+    bus_solar = {}
     for _, row in selected_data.iterrows():
         bus_id = row.get('bus_id')
         if bus_id is not None and not pd.isna(bus_id):
@@ -79,12 +80,17 @@ def run_simulation(selected_bids, buildings_gdf):
             if p_mw > 0:
                 pp.create_sgen(net, bus=int(bus_id), p_mw=p_mw, q_mvar=0, 
                                name=f"Solar_{row['unique_id']}")
+                bid_int = int(bus_id)
+                bus_solar[bid_int] = bus_solar.get(bid_int, 0) + p_mw
     
     # Run Power Flow
     try:
         pp.runpp(net, algorithm='nr', init='flat', numba=False)
         
         gdf = st.session_state.full_circuit_gdf.copy()
+        
+        # Initialize or reset solar_mw column
+        gdf['solar_mw'] = 0.0
         
         # Update results for all elements using vectorized operations where possible
         for etype in ['line', 'trafo', 'bus', 'load', 'sgen']:
@@ -99,6 +105,12 @@ def run_simulation(selected_bids, buildings_gdf):
                         if col in gdf.columns:
                             gdf.loc[mask, col] = res_filtered[col].values
         
+        # Update solar_mw for buses that have injection
+        if bus_solar:
+            for b_id, s_mw in bus_solar.items():
+                mask = (gdf['element_type'] == 'bus') & (gdf['index'] == b_id)
+                gdf.loc[mask, 'solar_mw'] = s_mw
+
         # Tooltips are generated lazily in get_visible_data
         st.session_state.full_circuit_gdf = gdf
         return True
@@ -174,7 +186,8 @@ def make_circuit_tooltip(row):
             'name': 'Name',
             'vn_kv': 'Nominal Voltage (kV)',
             'vm_pu': 'Voltage (pu)',
-            'va_degree': 'Angle (deg)'
+            'p_mw': 'Net Power (kW)',
+            'solar_mw': 'Solar Injection (kW)'
         }
     elif etype == "sgen":
         field_labels = {
@@ -289,6 +302,16 @@ def load_full_data():
         if 'element_type' not in circuit_gdf.columns:
             circuit_gdf['element_type'] = 'line'
         
+        # Initialize result columns for tooltips
+        result_cols = ['p_mw', 'q_mvar', 'vm_pu', 'loading_percent', 'solar_mw']
+        for col in result_cols:
+            if col not in circuit_gdf.columns:
+                circuit_gdf[col] = 0.0
+        
+        # Default voltage for buses
+        bus_mask = circuit_gdf['element_type'] == 'bus'
+        circuit_gdf.loc[bus_mask, 'vm_pu'] = 1.0
+
         # Tooltips will be generated lazily for better performance
 
     return gdf, circuit_gdf, center
