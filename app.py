@@ -6,6 +6,8 @@ from shapely.geometry import box
 import os
 import pandas as pd
 import requests
+import pandapower as pp
+import copy
 
 # Grid Configuration
 ELEMENT_CONFIG = {
@@ -34,6 +36,8 @@ if "last_processed_click" not in st.session_state:
     st.session_state.last_processed_click = None
 if "focused_building_id" not in st.session_state:
     st.session_state.focused_building_id = None
+if "full_circuit_gdf" not in st.session_state:
+    st.session_state.full_circuit_gdf = None
 
 st.markdown("""
     <style>
@@ -44,6 +48,60 @@ st.markdown("""
         .stSpinner { position: fixed; top: 50%; left: 50%; z-index: 9999; }
     </style>
 """, unsafe_allow_html=True)
+
+@st.cache_resource
+def get_base_net():
+    """Loads the base pandapower network from JSON."""
+    json_path = "./data/json/circuit_network.json"
+    if os.path.exists(json_path):
+        return pp.from_json(json_path)
+    return None
+
+def run_simulation(selected_bids, buildings_gdf):
+    """
+    Creates an in-memory copy of the network, adds solar sgens for 
+    selected buildings, runs power flow, and updates the global circuit GDF.
+    """
+    base_net = get_base_net()
+    if base_net is None or st.session_state.full_circuit_gdf is None:
+        return
+    
+    # Work on a deep copy to avoid modifying the cached base_net
+    net = copy.deepcopy(base_net)
+    
+    # Add sgens for each selected building
+    selected_data = buildings_gdf[buildings_gdf['unique_id'].isin(selected_bids)]
+    for _, row in selected_data.iterrows():
+        bus_id = row.get('bus_id')
+        if bus_id is not None and not pd.isna(bus_id):
+            # Convert peak_kwp to MW for pandapower
+            p_mw = row.get('peak_kwp', 0) / 1000.0
+            if p_mw > 0:
+                pp.create_sgen(net, bus=int(bus_id), p_mw=p_mw, q_mvar=0, 
+                               name=f"Solar_{row['unique_id']}")
+    
+    # Run Power Flow
+    try:
+        pp.runpp(net, algorithm='nr', init='flat', numba=False)
+        
+        gdf = st.session_state.full_circuit_gdf.copy()
+        
+        # Update results for all elements
+        for etype in ['line', 'trafo', 'bus', 'load', 'sgen']:
+            res_table = f'res_{etype}'
+            if hasattr(net, res_table) and not getattr(net, res_table).empty:
+                mask = gdf['element_type'] == etype
+                res = getattr(net, res_table).reindex(gdf.loc[mask, 'index'])
+                for col in res.columns:
+                    gdf.loc[mask, col] = res[col].values
+        
+        # Redo tooltips for the updated data
+        gdf['tooltip_html'] = gdf.apply(make_circuit_tooltip, axis=1)
+        st.session_state.full_circuit_gdf = gdf
+        return True
+    except Exception as e:
+        st.error(f"Simulation failed to converge: {e}")
+        return False
 
 @st.cache_data
 def get_pvgis_yield(lat, lon):
@@ -70,6 +128,105 @@ def get_pvgis_yield(lat, lon):
         st.warning(f"PVGIS API Error: {e}. Using fallback yield.")
     return 1246.0  # Fallback to previous heuristic value
 
+# Dynamic Tooltip for Grid
+def make_circuit_tooltip(row):
+    etype = row.get('element_type', 'element')
+    config = ELEMENT_CONFIG.get(etype, {"color": "#2979FF", "label": etype.capitalize()})
+    color = config.get("color", "#2979FF")
+    label_text = config.get("label", etype.capitalize())
+    
+    html = f"<div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>"
+    html += f"<h4 style='margin-top: 0; color: {color};'>{label_text}</h4>"
+    
+    if etype == "line":
+        field_labels = {
+            'name': 'Name',
+            'from_bus': 'From Bus',
+            'to_bus': 'To Bus',
+            'length_km': 'Length (km)',
+            'loading_percent': 'Loading (%)',
+            'p_from_mw': 'P (kW)',
+            'q_from_mvar': 'Q (kVAR)',
+            'i_ka': 'Current (A)'
+        }
+    elif etype == "trafo":
+        field_labels = {
+            'name': 'Name',
+            'hv_bus': 'HV Bus',
+            'lv_bus': 'LV Bus',
+            'loading_percent': 'Loading (%)',
+            'p_hv_mw': 'P HV (kW)',
+            'q_hv_mvar': 'Q HV (kVAR)',
+            'sn_mva': 'Rating (MVA)'
+        }
+    elif etype == "load":
+        field_labels = {
+            'name': 'Name',
+            'bus': 'Bus',
+            'p_mw': 'P (kW)',
+            'q_mvar': 'Q (kVAR)'
+        }
+    elif etype == "bus":
+        field_labels = {
+            'name': 'Name',
+            'vn_kv': 'Nominal Voltage (kV)',
+            'vm_pu': 'Voltage (pu)',
+            'va_degree': 'Angle (deg)'
+        }
+    elif etype == "sgen":
+        field_labels = {
+            'name': 'Name',
+            'bus': 'Bus',
+            'p_mw': 'P (kW)',
+            'q_mvar': 'Q (kVAR)'
+        }
+    else:
+        field_labels = {
+            'name': 'Name',
+            'vn_kv': 'Voltage (kV)',
+            'p_mw': 'P (kW)',
+            'q_mvar': 'Q (kVAR)',
+            'loading_percent': 'Loading (%)',
+            'vm_pu': 'Voltage (pu)',
+            'index': 'ID'
+        }
+    
+    for col, label in field_labels.items():
+        if col in row.index and pd.notnull(row[col]):
+            val = row[col]
+            if isinstance(val, str) and (val.strip() == "" or val.lower() == "nan"):
+                continue
+            if isinstance(val, (int, float)) and pd.isna(val):
+                continue
+            
+            # Convert MW/MVAR to kW/kVAR
+            if any(suffix in col for suffix in ['_mw', '_mvar']):
+                val = abs(val) * 1000
+            
+            # Convert kA to A
+            if '_ka' in col or col == 'i_ka':
+                val = abs(val) * 1000
+
+            if col == 'loading_percent':
+                if val > 100:
+                    html += f"<b>{label}:</b> <span style='color: #FF5252;'>{val:,.1f}% (OVERLOAD)</span><br>"
+                else:
+                    html += f"<b>{label}:</b> {val:,.1f}%<br>"
+            elif col == 'vm_pu' and val < 0.95:
+                html += f"<b>{label}:</b> <span style='color: #FF5252;'>{val:,.3f} pu (LOW)</span><br>"
+            elif col in ['from_bus', 'to_bus', 'bus', 'index', 'hv_bus', 'lv_bus']:
+                try:
+                    html += f"<b>{label}:</b> {int(float(val))}<br>"
+                except:
+                    html += f"<b>{label}:</b> {val}<br>"
+            elif isinstance(val, (int, float)):
+                html += f"<b>{label}:</b> {val:,.2f}<br>"
+            else:
+                html += f"<b>{label}:</b> {val}<br>"
+    
+    html += "</div>"
+    return html
+
 @st.cache_data
 def load_full_data():
     # Buildings
@@ -79,25 +236,18 @@ def load_full_data():
     else:
         gdf = gdf.to_crs(epsg=4326)
 
-    # Ensure unique ID for every building (building_id is not unique in merged data)
+    # Ensure unique ID for every building
     gdf['unique_id'] = range(len(gdf))
     gdf['unique_id'] = gdf['unique_id'].astype(str)
 
-    # Center calculation
     if not gdf.empty:
-        try:
-            bounds = gdf.total_bounds
-            center = ((bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2)
-        except Exception:
-            center = (53.5461, -113.4938)
+        bounds = gdf.total_bounds
+        center = ((bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2)
     else:
         center = (53.5461, -113.4938)
 
-    # Fetch PVGIS data for the center of the dataset
     pvgis_yield = get_pvgis_yield(center[0], center[1])
 
-    # Calculations: area * utilization (70%) * efficiency (20%) * yield (kWh/kWp)
-    # 0.7 * 0.2 = 0.14 kWp/m2
     gdf['peak_kwp'] = gdf['area'] * 0.14
     gdf['solar_potential_kwh'] = gdf['peak_kwp'] * pvgis_yield
     gdf['money_saved'] = gdf['solar_potential_kwh'] * 0.15
@@ -129,109 +279,15 @@ def load_full_data():
             'hv_bus', 'lv_bus', 'i_ka', 'i_from_ka', 'i_to_ka'
         ]
         cols_to_keep = [c for c in useful_cols if c in circuit_gdf.columns]
-        
-        # Dynamic Tooltip for Grid
-        def make_circuit_tooltip(row):
-            etype = row.get('element_type', 'element')
-            config = ELEMENT_CONFIG.get(etype, {"color": "#2979FF", "label": etype.capitalize()})
-            color = config.get("color", "#2979FF")
-            label_text = config.get("label", etype.capitalize())
-            
-            html = f"<div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>"
-            html += f"<h4 style='margin-top: 0; color: {color};'>{label_text}</h4>"
-            
-            if etype == "line":
-                field_labels = {
-                    'name': 'Name',
-                    'from_bus': 'From Bus',
-                    'to_bus': 'To Bus',
-                    'length_km': 'Length (km)',
-                    'loading_percent': 'Loading (%)',
-                    'p_from_mw': 'P (kW)',
-                    'q_from_mvar': 'Q (kVAR)',
-                    'i_ka': 'Current (A)'
-                }
-            elif etype == "trafo":
-                field_labels = {
-                    'name': 'Name',
-                    'hv_bus': 'HV Bus',
-                    'lv_bus': 'LV Bus',
-                    'loading_percent': 'Loading (%)',
-                    'p_hv_mw': 'P HV (kW)',
-                    'q_hv_mvar': 'Q HV (kVAR)',
-                    'sn_mva': 'Rating (MVA)'
-                }
-            elif etype == "load":
-                field_labels = {
-                    'name': 'Name',
-                    'bus': 'Bus',
-                    'p_mw': 'P (kW)',
-                    'q_mvar': 'Q (kVAR)'
-                }
-            elif etype == "bus":
-                field_labels = {
-                    'name': 'Name',
-                    'vn_kv': 'Nominal Voltage (kV)',
-                    'vm_pu': 'Voltage (pu)',
-                    'va_degree': 'Angle (deg)'
-                }
-            else:
-                field_labels = {
-                    'name': 'Name',
-                    'vn_kv': 'Voltage (kV)',
-                    'p_mw': 'P (kW)',
-                    'q_mvar': 'Q (kVAR)',
-                    'loading_percent': 'Loading (%)',
-                    'vm_pu': 'Voltage (pu)',
-                    'index': 'ID'
-                }
-            
-            for col, label in field_labels.items():
-                if col in row.index and pd.notnull(row[col]):
-                    val = row[col]
-                    if isinstance(val, str) and (val.strip() == "" or val.lower() == "nan"):
-                        continue
-                    if isinstance(val, (int, float)) and pd.isna(val):
-                        continue
-                    
-                    # Convert MW/MVAR to kW/kVAR and use absolute magnitude for intuitive display
-                    if any(suffix in col for suffix in ['_mw', '_mvar']):
-                        val = abs(val) * 1000
-                    
-                    # Convert kA to A
-                    if '_ka' in col or col == 'i_ka':
-                        val = abs(val) * 1000
-
-                    # Highlight overloads
-                    if col == 'loading_percent':
-                        if val > 100:
-                            html += f"<b>{label}:</b> <span style='color: #FF5252;'>{val:,.1f}% (OVERLOAD)</span><br>"
-                        else:
-                            html += f"<b>{label}:</b> {val:,.1f}%<br>"
-                    # Highlight low voltage
-                    elif col == 'vm_pu' and val < 0.95:
-                        html += f"<b>{label}:</b> <span style='color: #FF5252;'>{val:,.3f} pu (LOW)</span><br>"
-                    # Format IDs/Buses as integers with no commas
-                    elif col in ['from_bus', 'to_bus', 'bus', 'index', 'hv_bus', 'lv_bus']:
-                        try:
-                            html += f"<b>{label}:</b> {int(float(val))}<br>"
-                        except (ValueError, TypeError):
-                            html += f"<b>{label}:</b> {val}<br>"
-                    elif isinstance(val, (int, float)):
-                        html += f"<b>{label}:</b> {val:,.2f}<br>"
-                    else:
-                        html += f"<b>{label}:</b> {val}<br>"
-            
-            html += "</div>"
-            return html
-
+        circuit_gdf = circuit_gdf[cols_to_keep]
         circuit_gdf['tooltip_html'] = circuit_gdf.apply(make_circuit_tooltip, axis=1)
-        circuit_gdf = circuit_gdf[cols_to_keep + ['tooltip_html']]
 
     return gdf, circuit_gdf, center
 
 with st.spinner("Loading Edmonton Solar & Grid Data..."):
-    full_gdf, full_circuit_gdf, default_center = load_full_data()
+    full_gdf, initial_circuit_gdf, default_center = load_full_data()
+    if st.session_state.full_circuit_gdf is None:
+        st.session_state.full_circuit_gdf = initial_circuit_gdf
 
 # Update Tooltips dynamically based on selection (NOT CACHED)
 def make_building_tooltip(row):
@@ -249,12 +305,9 @@ def make_building_tooltip(row):
 
 full_gdf["tooltip_html"] = full_gdf.apply(make_building_tooltip, axis=1)
 
-# Redundant session state block removed (moved to top)
-
 # Viewport Filtering Logic
 def get_visible_data(gdf, circuit_gdf, bounds):
     if bounds is None:
-        # Default view: small box around center
         lat, lon = st.session_state.center
         buffer = 0.005
         view_box = box(lon - buffer, lat - buffer, lon + buffer, lat + buffer)
@@ -263,7 +316,6 @@ def get_visible_data(gdf, circuit_gdf, bounds):
         ne = bounds["_northEast"]
         view_box = box(sw["lng"], sw["lat"], ne["lng"], ne["lat"])
     
-    # Filter buildings (only if zoomed in)
     visible_gdf = gdf.iloc[:0].copy()
     if st.session_state.zoom >= 16:
         spatial_index = gdf.sindex
@@ -271,7 +323,6 @@ def get_visible_data(gdf, circuit_gdf, bounds):
         visible_gdf = gdf.iloc[possible_indices].copy()
         visible_gdf = visible_gdf[visible_gdf.geometry.intersects(view_box)]
     
-    # Filter circuit (only if zoomed in)
     visible_circuit = None
     if circuit_gdf is not None and st.session_state.zoom >= 16:
         c_spatial_index = circuit_gdf.sindex
@@ -285,7 +336,7 @@ last_map_data = st.session_state.get("last_map_data", None)
 current_bounds = last_map_data.get("bounds") if last_map_data else None
 
 # Filter data for the CURRENT render
-visible_buildings, visible_grid = get_visible_data(full_gdf, full_circuit_gdf, current_bounds)
+visible_buildings, visible_grid = get_visible_data(full_gdf, st.session_state.full_circuit_gdf, current_bounds)
 
 m = folium.Map(
     location=st.session_state.center,
@@ -314,25 +365,25 @@ if visible_grid is not None and len(visible_grid) > 0:
                 weight = config.get("weight", 2)
                 
                 if etype == 'line':
-                    if loading > 100: color = "#FF1744" # Vivid Red
-                    elif loading > 80: color = "#FFFF00" # Bright Yellow
-                    elif loading > 30: color = "#00FF00" # Bright Green
-                    else: color = "#00E5FF"              # Cyan
-                    weight = 4 + (loading / 20.0) # Thicker base and more aggressive scaling
+                    if loading > 100: color = "#FF1744"
+                    elif loading > 80: color = "#FFFF00"
+                    elif loading > 30: color = "#00FF00"
+                    else: color = "#00E5FF"
+                    weight = 4 + (loading / 20.0)
                 elif etype == 'trafo' and loading > 100:
                     color = "#FF1744"
                 
                 return {
                     "color": color,
                     "weight": weight,
-                    "opacity": 0.9, # Higher opacity for lines
+                    "opacity": 0.9,
                 }
 
             folium.GeoJson(
                 subset,
                 style_function=style_fn,
                 marker=folium.CircleMarker(
-                    radius=config.get("radius", 3) + 1, # Slightly larger markers
+                    radius=config.get("radius", 3) + 1,
                     color=config["color"],
                     fill=True,
                     fill_opacity=1.0
@@ -353,7 +404,7 @@ if visible_grid is not None and len(visible_grid) > 0:
                         midpoint = row.geometry.interpolate(0.5, normalized=True)
                         p_kw = abs(row.get('p_from_mw', 0)) * 1000
                         ld = row.get('loading_percent', 0)
-                        if p_kw > 0.1: # Show even small flows
+                        if p_kw > 0.1:
                             folium.Marker(
                                 location=[midpoint.y, midpoint.x],
                                 icon=folium.DivIcon(
@@ -406,7 +457,6 @@ if map_output:
     new_drawing = map_output.get("last_active_drawing")
     new_click_point = map_output.get("last_object_clicked")
     
-    # Unique identifier for the click event
     click_id = (str(new_drawing), str(new_click_point)) if new_drawing and new_click_point else None
     
     if click_id and click_id != st.session_state.last_processed_click:
@@ -418,12 +468,14 @@ if map_output:
             else:
                 st.session_state.selected_buildings.add(bid)
             st.session_state.last_processed_click = click_id
+            
+            # TRIGGER SIMULATION
+            with st.spinner("Recalculating Power Flow..."):
+                run_simulation(st.session_state.selected_buildings, full_gdf)
             changed = True
 
-    # Handle viewport changes (center/zoom) with proper comparison
     if map_output.get("center"):
         new_center = (map_output["center"]["lat"], map_output["center"]["lng"])
-        # Use rounding to avoid jitter/precision issues
         old_center = st.session_state.center
         if (round(new_center[0], 6) != round(old_center[0], 6) or 
             round(new_center[1], 6) != round(old_center[1], 6)):
@@ -455,6 +507,8 @@ low_voltages = 0
 total_demand_kw = 0
 total_gen_kw = 0
 
+# Use session state grid for analytics
+sim_grid = st.session_state.full_circuit_gdf
 if visible_grid is not None and not visible_grid.empty:
     if 'loading_percent' in visible_grid.columns:
         valid_loading = visible_grid['loading_percent'].dropna()
