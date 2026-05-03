@@ -86,17 +86,20 @@ def run_simulation(selected_bids, buildings_gdf):
         
         gdf = st.session_state.full_circuit_gdf.copy()
         
-        # Update results for all elements
+        # Update results for all elements using vectorized operations where possible
         for etype in ['line', 'trafo', 'bus', 'load', 'sgen']:
             res_table = f'res_{etype}'
-            if hasattr(net, res_table) and not getattr(net, res_table).empty:
-                mask = gdf['element_type'] == etype
-                res = getattr(net, res_table).reindex(gdf.loc[mask, 'index'])
-                for col in res.columns:
-                    gdf.loc[mask, col] = res[col].values
+            if hasattr(net, res_table):
+                res = getattr(net, res_table)
+                if not res.empty:
+                    mask = (gdf['element_type'] == etype)
+                    indices = gdf.loc[mask, 'index']
+                    res_filtered = res.reindex(indices)
+                    for col in res_filtered.columns:
+                        if col in gdf.columns:
+                            gdf.loc[mask, col] = res_filtered[col].values
         
-        # Redo tooltips for the updated data
-        gdf['tooltip_html'] = gdf.apply(make_circuit_tooltip, axis=1)
+        # Tooltips are generated lazily in get_visible_data
         st.session_state.full_circuit_gdf = gdf
         return True
     except Exception as e:
@@ -230,35 +233,51 @@ def make_circuit_tooltip(row):
 @st.cache_data
 def load_full_data():
     # Buildings
-    gdf = gpd.read_parquet("./data/output/merged_buildings.parquet")
-    if gdf.crs is None:
-        gdf = gdf.set_crs(epsg=4326)
+    optimized_buildings_path = "./data/output/buildings_optimized.parquet"
+    if os.path.exists(optimized_buildings_path):
+        gdf = gpd.read_parquet(optimized_buildings_path)
     else:
-        gdf = gdf.to_crs(epsg=4326)
+        # Fallback to original if optimized not found
+        gdf = gpd.read_parquet("./data/output/merged_buildings.parquet")
+        if gdf.crs is None:
+            gdf = gdf.set_crs(epsg=4326)
+        else:
+            gdf = gdf.to_crs(epsg=4326)
 
-    # Ensure unique ID for every building
-    gdf['unique_id'] = range(len(gdf))
-    gdf['unique_id'] = gdf['unique_id'].astype(str)
+        # Ensure unique ID for every building
+        gdf['unique_id'] = range(len(gdf))
+        gdf['unique_id'] = gdf['unique_id'].astype(str)
 
+        if not gdf.empty:
+            bounds = gdf.total_bounds
+            center = ((bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2)
+        else:
+            center = (53.5461, -113.4938)
+
+        pvgis_yield = get_pvgis_yield(center[0], center[1])
+
+        gdf['peak_kwp'] = gdf['area'] * 0.14
+        gdf['solar_potential_kwh'] = gdf['peak_kwp'] * pvgis_yield
+        gdf['money_saved'] = gdf['solar_potential_kwh'] * 0.15
+        gdf['co2_saved_tonnes'] = (gdf['solar_potential_kwh'] * 0.424) / 1000
+        gdf['homes_powered'] = gdf['solar_potential_kwh'] / 7200
+        gdf['evs_charged'] = gdf['solar_potential_kwh'] / 3040
+        
+        gdf['geometry'] = gdf['geometry'].simplify(0.00001, preserve_topology=True)
+    
     if not gdf.empty:
         bounds = gdf.total_bounds
         center = ((bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2)
     else:
         center = (53.5461, -113.4938)
 
-    pvgis_yield = get_pvgis_yield(center[0], center[1])
-
-    gdf['peak_kwp'] = gdf['area'] * 0.14
-    gdf['solar_potential_kwh'] = gdf['peak_kwp'] * pvgis_yield
-    gdf['money_saved'] = gdf['solar_potential_kwh'] * 0.15
-    gdf['co2_saved_tonnes'] = (gdf['solar_potential_kwh'] * 0.424) / 1000
-    gdf['homes_powered'] = gdf['solar_potential_kwh'] / 7200
-    gdf['evs_charged'] = gdf['solar_potential_kwh'] / 3040
-    
-    gdf['geometry'] = gdf['geometry'].simplify(0.00001, preserve_topology=True)
-    
     # Grid
-    circuit_path = "./data/output/circuit_network.parquet"
+    optimized_circuit_path = "./data/output/circuit_optimized.parquet"
+    if os.path.exists(optimized_circuit_path):
+        circuit_path = optimized_circuit_path
+    else:
+        circuit_path = "./data/output/circuit_network.parquet"
+
     circuit_gdf = None
     if os.path.exists(circuit_path):
         circuit_gdf = gpd.read_parquet(circuit_path)
@@ -266,21 +285,11 @@ def load_full_data():
             circuit_gdf = circuit_gdf.set_crs(epsg=4326)
         else:
             circuit_gdf = circuit_gdf.to_crs(epsg=4326)
-        circuit_gdf['geometry'] = circuit_gdf['geometry'].simplify(0.00005, preserve_topology=True)
+        
         if 'element_type' not in circuit_gdf.columns:
             circuit_gdf['element_type'] = 'line'
         
-        useful_cols = [
-            'geometry', 'element_type', 'name', 'vn_kv', 'p_mw', 'q_mvar', 
-            'length_km', 'sn_mva', 'index', 'from_bus', 'to_bus', 
-            'r_ohm_per_km', 'x_ohm_per_km', 'c_nf_per_km', 'g_us_per_km', 'bus',
-            'p_from_mw', 'q_from_mvar', 'p_to_mw', 'q_to_mvar', 'loading_percent', 
-            'vm_pu', 'va_degree', 'p_hv_mw', 'q_hv_mvar', 'p_lv_mw', 'q_lv_mvar',
-            'hv_bus', 'lv_bus', 'i_ka', 'i_from_ka', 'i_to_ka'
-        ]
-        cols_to_keep = [c for c in useful_cols if c in circuit_gdf.columns]
-        circuit_gdf = circuit_gdf[cols_to_keep]
-        circuit_gdf['tooltip_html'] = circuit_gdf.apply(make_circuit_tooltip, axis=1)
+        # Tooltips will be generated lazily for better performance
 
     return gdf, circuit_gdf, center
 
@@ -303,8 +312,6 @@ def make_building_tooltip(row):
     </div>
     """
 
-full_gdf["tooltip_html"] = full_gdf.apply(make_building_tooltip, axis=1)
-
 # Viewport Filtering Logic
 def get_visible_data(gdf, circuit_gdf, bounds):
     if bounds is None:
@@ -322,6 +329,9 @@ def get_visible_data(gdf, circuit_gdf, bounds):
         possible_indices = list(spatial_index.intersection(view_box.bounds))
         visible_gdf = gdf.iloc[possible_indices].copy()
         visible_gdf = visible_gdf[visible_gdf.geometry.intersects(view_box)]
+        # Generate tooltips lazily only for visible buildings
+        if not visible_gdf.empty:
+            visible_gdf["tooltip_html"] = visible_gdf.apply(make_building_tooltip, axis=1)
     
     visible_circuit = None
     if circuit_gdf is not None and st.session_state.zoom >= 16:
@@ -329,6 +339,9 @@ def get_visible_data(gdf, circuit_gdf, bounds):
         c_possible_indices = list(c_spatial_index.intersection(view_box.bounds))
         visible_circuit = circuit_gdf.iloc[c_possible_indices].copy()
         visible_circuit = visible_circuit[visible_circuit.geometry.intersects(view_box)]
+        # Generate tooltips lazily only for visible grid elements
+        if not visible_circuit.empty:
+            visible_circuit['tooltip_html'] = visible_circuit.apply(make_circuit_tooltip, axis=1)
         
     return visible_gdf, visible_circuit
 
@@ -344,7 +357,8 @@ m = folium.Map(
     tiles="http://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}",
     attr="Google Satellite",
     max_zoom=20,
-    zoom_control=True
+    zoom_control=True,
+    prefer_canvas=True
 )
 
 # Add grid layers
