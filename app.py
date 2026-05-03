@@ -23,6 +23,18 @@ ELEMENT_TYPES = ["bus", "load", "sgen", "gen", "switch", "shunt", "ext_grid", "l
 
 st.set_page_config(page_title="Solar Labs Ltd.", layout="wide")
 
+# Initialize session state EARLY
+if "center" not in st.session_state:
+    st.session_state.center = (53.5461, -113.4938)
+if "zoom" not in st.session_state:
+    st.session_state.zoom = 18
+if "selected_buildings" not in st.session_state:
+    st.session_state.selected_buildings = set()
+if "last_processed_click" not in st.session_state:
+    st.session_state.last_processed_click = None
+if "focused_building_id" not in st.session_state:
+    st.session_state.focused_building_id = None
+
 st.markdown("""
     <style>
         .block-container { padding: 0rem !important; max-width: 100% !important; }
@@ -67,6 +79,10 @@ def load_full_data():
     else:
         gdf = gdf.to_crs(epsg=4326)
 
+    # Ensure unique ID for every building (building_id is not unique in merged data)
+    gdf['unique_id'] = range(len(gdf))
+    gdf['unique_id'] = gdf['unique_id'].astype(str)
+
     # Center calculation
     if not gdf.empty:
         try:
@@ -90,22 +106,6 @@ def load_full_data():
     gdf['evs_charged'] = gdf['solar_potential_kwh'] / 3040
     
     gdf['geometry'] = gdf['geometry'].simplify(0.00001, preserve_topology=True)
-    
-    # Tooltip
-    gdf["tooltip_html"] = gdf.apply(
-        lambda row: f"""
-        <div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>
-            <h4 style='margin-top: 0; color: #FF9F00;'>Building #{row.building_id}</h4>
-            <b>Roof Area:</b> {row.area:,.0f} m²<br>
-            <b>Peak Solar:</b> {row.peak_kwp:,.1f} kWp<br>
-            <b>Energy Potential:</b> {row.solar_potential_kwh:,.0f} kWh/yr<br>
-            <b>Est. Savings:</b> <span style='color: green;'>${row.money_saved:,.0f}/yr</span>
-            <hr style='margin: 8px 0; border: 0; border-top: 1px solid #eee;'>
-            <div style='font-size: 10px; color: #666;'>Powered by PVGIS v6</div>
-        </div>
-        """,
-        axis=1
-    )
     
     # Grid
     circuit_path = "./data/output/circuit_network.parquet"
@@ -233,11 +233,23 @@ def load_full_data():
 with st.spinner("Loading Edmonton Solar & Grid Data..."):
     full_gdf, full_circuit_gdf, default_center = load_full_data()
 
-# Initialize session state for viewport
-if "center" not in st.session_state:
-    st.session_state.center = default_center
-if "zoom" not in st.session_state:
-    st.session_state.zoom = 18
+# Update Tooltips dynamically based on selection (NOT CACHED)
+def make_building_tooltip(row):
+    return f"""
+    <div style='font-family: sans-serif; padding: 10px; min-width: 150px;'>
+        <h4 style='margin-top: 0; color: #FF9F00;'>Building #{row.unique_id}</h4>
+        <b>Roof Area:</b> {row.area:,.0f} m²<br>
+        <b>Peak Solar:</b> {row.peak_kwp:,.1f} kWp<br>
+        <b>Energy Potential:</b> {row.solar_potential_kwh:,.0f} kWh/yr<br>
+        <b>Est. Savings:</b> <span style='color: green;'>${row.money_saved:,.0f}/yr</span>
+        <hr style='margin: 8px 0; border: 0; border-top: 1px solid #eee;'>
+        <div style='font-size: 10px; color: #666;'>Powered by PVGIS v6</div>
+    </div>
+    """
+
+full_gdf["tooltip_html"] = full_gdf.apply(make_building_tooltip, axis=1)
+
+# Redundant session state block removed (moved to top)
 
 # Viewport Filtering Logic
 def get_visible_data(gdf, circuit_gdf, bounds):
@@ -358,7 +370,7 @@ if visible_grid is not None and len(visible_grid) > 0:
 # Add buildings
 if len(visible_buildings) > 0:
     folium.GeoJson(
-        visible_buildings[['geometry', 'tooltip_html']],
+        visible_buildings[['geometry', 'tooltip_html', 'unique_id']],
         name="Solar Potential",
         tooltip=folium.GeoJsonTooltip(
             fields=["tooltip_html"],
@@ -369,9 +381,9 @@ if len(visible_buildings) > 0:
         ),
         style_function=lambda x: {
             "fillColor": "#FFD54F",
-            "color": "#FFA000",
-            "weight": 1,
-            "fillOpacity": 0.2, # Much more transparent to emphasize the grid
+            "color": "#00FF00" if x['properties'].get('unique_id') in st.session_state.selected_buildings else "#FFA000",
+            "weight": 3 if x['properties'].get('unique_id') in st.session_state.selected_buildings else 1,
+            "fillOpacity": 0.2,
         },
     ).add_to(m)
 
@@ -383,18 +395,46 @@ map_output = st_folium(
     width="100%", 
     height=900, 
     key="solar_map", 
-    returned_objects=["bounds", "center", "zoom"]
+    returned_objects=["bounds", "center", "zoom", "last_active_drawing", "last_object_clicked"]
 )
 
 # Update session state and rerun if the view changed
 if map_output:
     changed = False
-    if map_output.get("center") and map_output["center"] != st.session_state.center:
-        st.session_state.center = (map_output["center"]["lat"], map_output["center"]["lng"])
-        changed = True
-    if map_output.get("zoom") and map_output["zoom"] != st.session_state.zoom:
-        st.session_state.zoom = map_output["zoom"]
-        changed = True
+    
+    # Handle building toggle
+    new_drawing = map_output.get("last_active_drawing")
+    new_click_point = map_output.get("last_object_clicked")
+    
+    # Unique identifier for the click event
+    click_id = (str(new_drawing), str(new_click_point)) if new_drawing and new_click_point else None
+    
+    if click_id and click_id != st.session_state.last_processed_click:
+        props = new_drawing.get("properties")
+        if props and "unique_id" in props:
+            bid = props["unique_id"]
+            if bid in st.session_state.selected_buildings:
+                st.session_state.selected_buildings.remove(bid)
+            else:
+                st.session_state.selected_buildings.add(bid)
+            st.session_state.last_processed_click = click_id
+            changed = True
+
+    # Handle viewport changes (center/zoom) with proper comparison
+    if map_output.get("center"):
+        new_center = (map_output["center"]["lat"], map_output["center"]["lng"])
+        # Use rounding to avoid jitter/precision issues
+        old_center = st.session_state.center
+        if (round(new_center[0], 6) != round(old_center[0], 6) or 
+            round(new_center[1], 6) != round(old_center[1], 6)):
+            st.session_state.center = new_center
+            changed = True
+            
+    if map_output.get("zoom") is not None:
+        new_zoom = map_output["zoom"]
+        if new_zoom != st.session_state.zoom:
+            st.session_state.zoom = new_zoom
+            changed = True
     
     if changed:
         st.session_state.last_map_data = map_output
