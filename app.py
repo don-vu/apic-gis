@@ -331,10 +331,8 @@ def make_building_tooltip(row):
         <b>Energy Potential:</b> {row.solar_potential_kwh:,.0f} kWh/yr<br>
         <b>Est. Savings:</b> <span style='color: green;'>${row.money_saved:,.0f}/yr</span>
         <hr style='margin: 8px 0; border: 0; border-top: 1px solid #eee;'>
-        <div style='font-size: 10px; color: #666;'>Powered by PVGIS v6</div>
-    </div>
-    """
-
+        </div>
+        """
 # Viewport Filtering Logic
 def get_visible_data(gdf, circuit_gdf, bounds):
     if bounds is None:
@@ -536,38 +534,6 @@ total_co2 = visible_buildings['co2_saved_tonnes'].sum()
 total_homes = visible_buildings['homes_powered'].sum()
 total_evs = visible_buildings['evs_charged'].sum()
 
-# Grid Analytics
-max_loading = 0
-min_voltage = 1.0
-overloads = 0
-low_voltages = 0
-total_demand_kw = 0
-total_gen_kw = 0
-
-# Use session state grid for analytics
-sim_grid = st.session_state.full_circuit_gdf
-if visible_grid is not None and not visible_grid.empty:
-    if 'loading_percent' in visible_grid.columns:
-        valid_loading = visible_grid['loading_percent'].dropna()
-        if not valid_loading.empty:
-            max_loading = valid_loading.max()
-            overloads = len(valid_loading[valid_loading > 100])
-    
-    if 'vm_pu' in visible_grid.columns:
-        valid_v = visible_grid['vm_pu'].dropna()
-        if not valid_v.empty:
-            min_voltage = valid_v.min()
-            low_voltages = len(valid_v[valid_v < 0.95])
-            
-    # Calculate Totals
-    loads = visible_grid[visible_grid['element_type'] == 'load']
-    if not loads.empty and 'p_mw' in loads.columns:
-        total_demand_kw = loads['p_mw'].sum() * 1000
-    
-    gens = visible_grid[visible_grid['element_type'].isin(['sgen', 'gen', 'ext_grid'])]
-    if not gens.empty and 'p_mw' in gens.columns:
-        total_gen_kw = gens['p_mw'].sum() * 1000
-
 st.markdown(f'''
      <div style="
      position: fixed; top: 20px; right: 20px; width: 320px; 
@@ -579,7 +545,6 @@ st.markdown(f'''
      
      <h4 style="color: #111; margin: 0 0 4px 0; font-size: 15px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;">
          Live Screen Analytics
-         <span style="font-size: 10px; color: #888; text-transform: none; float: right; font-weight: normal;">Powered by PVGIS</span>
      </h4>
      {f'<div style="color: #FF5252; font-size: 12px; font-weight: 600; margin-bottom: 8px;">⚠️ Zoom in to see buildings & grid</div>' if st.session_state.zoom < 16 else ''}
      <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
@@ -597,30 +562,6 @@ st.markdown(f'''
          <span style="font-size: 18px; font-weight: 700; color: #10B981;">${total_savings:,.0f}<span style="font-size: 12px;">/yr</span></span>
      </div>
      
-     <h4 style="color: #111; margin: 0 0 4px 0; font-size: 15px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;">
-         Grid Health (Simulation)
-     </h4>
-     <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
-         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Total Demand:</span>
-         <span style="font-size: 18px; font-weight: 700; color: #1a1a1a;">{total_demand_kw:,.0f} <span style="font-size: 12px;">kW</span></span>
-     </div>
-     <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
-         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Total Generation:</span>
-         <span style="font-size: 18px; font-weight: 700; color: #10B981;">{total_gen_kw:,.0f} <span style="font-size: 12px;">kW</span></span>
-     </div>
-     <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
-         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Max Loading:</span>
-         <span style="font-size: 18px; font-weight: 700; color: {'#FF5252' if max_loading > 100 else '#10B981'};">{max_loading:,.1f}%</span>
-     </div>
-     <div style="display: flex; align-items: baseline; margin-bottom: 2px;">
-         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Min Voltage:</span>
-         <span style="font-size: 18px; font-weight: 700; color: {'#FF5252' if min_voltage < 0.95 else '#10B981'};">{min_voltage:,.3f} <span style="font-size: 12px;">pu</span></span>
-     </div>
-     <div style="display: flex; align-items: baseline; margin-bottom: 12px; border-bottom: 1px solid #f0f0f0; padding-bottom: 12px;">
-         <span style="font-weight: 600; color: #555; font-size: 14px; width: 140px;">Violations:</span>
-         <span style="font-size: 18px; font-weight: 700; color: {'#FF5252' if (overloads + low_voltages) > 0 else '#10B981'};">{overloads + low_voltages}</span>
-     </div>
-
      <h4 style="color: #111; margin: 0 0 4px 0; font-size: 15px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase;">
          Environmental Impact
      </h4>
