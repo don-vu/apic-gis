@@ -42,10 +42,25 @@ if "full_circuit_gdf" not in st.session_state:
 st.markdown("""
     <style>
         .block-container { padding: 0rem !important; max-width: 100% !important; }
-        header {visibility: hidden;}
-        footer {visibility: hidden;}
+        header {visibility: hidden; height: 0px;}
+        footer {visibility: hidden; height: 0px;}
         .stApp { overflow: hidden !important; }
         .stSpinner { position: fixed; top: 50%; left: 50%; z-index: 9999; }
+        /* Force the map to fill the viewport height */
+        iframe {
+            height: 100vh !important;
+            width: 100vw !important;
+        }
+        /* Remove any potential margins/padding from the streamlit elements */
+        div[data-testid="stVerticalBlock"] > div {
+            padding: 0 !important;
+        }
+        div[data-testid="stAppViewContainer"] > section > div {
+            padding: 0 !important;
+        }
+        /* Additional resets for streamlit 1.30+ */
+        [data-testid="stHeader"] {display: none;}
+        .main .block-container {padding: 0;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -479,7 +494,7 @@ folium.LayerControl(position='bottomright', collapsed=False).add_to(m)
 map_output = st_folium(
     m, 
     width="100%", 
-    height=900, 
+    height=1200, 
     key="solar_map", 
     returned_objects=["bounds", "center", "zoom", "last_active_drawing", "last_object_clicked"]
 )
