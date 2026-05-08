@@ -39,6 +39,16 @@ if "focused_building_id" not in st.session_state:
 if "full_circuit_gdf" not in st.session_state:
     st.session_state.full_circuit_gdf = None
 
+# Visibility Flags
+if "show_buildings" not in st.session_state:
+    st.session_state.show_buildings = True
+if "show_loads" not in st.session_state:
+    st.session_state.show_loads = True
+if "show_buses" not in st.session_state:
+    st.session_state.show_buses = True
+if "show_lines" not in st.session_state:
+    st.session_state.show_lines = True
+
 st.markdown("""
     <style>
         .block-container { padding: 0rem !important; max-width: 100% !important; }
@@ -61,6 +71,33 @@ st.markdown("""
         /* Additional resets for streamlit 1.30+ */
         [data-testid="stHeader"] {display: none;}
         .main .block-container {padding: 0;}
+
+        /* Layer Control Panel Styling */
+        [data-testid="stVerticalBlock"] > div:has(.layer-control-anchor) {
+            position: fixed;
+            bottom: 40px;
+            left: 20px;
+            width: 220px;
+            background-color: rgba(255, 255, 255, 0.98);
+            border: 1px solid #e0e0e0;
+            z-index: 100000;
+            font-family: sans-serif;
+            border-radius: 12px;
+            padding: 18px 20px;
+            box-shadow: 0px 8px 24px rgba(0,0,0,0.15);
+        }
+        .layer-control-anchor {
+            display: none;
+        }
+        /* Make sure the streamlit checkboxes inside the panel are legible */
+        [data-testid="stVerticalBlock"] > div:has(.layer-control-anchor) .stCheckbox {
+            margin-bottom: -15px;
+        }
+        [data-testid="stVerticalBlock"] > div:has(.layer-control-anchor) [data-testid="stWidgetLabel"] p {
+            font-size: 14px !important;
+            font-weight: 600 !important;
+            color: #333 !important;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -400,6 +437,11 @@ m = folium.Map(
 # Add grid layers
 if visible_grid is not None and len(visible_grid) > 0:
     for etype in ELEMENT_TYPES:
+        # Visibility Filtering
+        if etype == "bus" and not st.session_state.show_buses: continue
+        if etype == "load" and not st.session_state.show_loads: continue
+        if etype in ["line", "trafo"] and not st.session_state.show_lines: continue
+        
         subset = visible_grid[visible_grid['element_type'] == etype]
         if not subset.empty:
             config = ELEMENT_CONFIG.get(etype, {"color": "#999999", "label": etype.capitalize()})
@@ -469,7 +511,7 @@ if visible_grid is not None and len(visible_grid) > 0:
                             ).add_to(fg)
 
 # Add buildings
-if len(visible_buildings) > 0:
+if len(visible_buildings) > 0 and st.session_state.show_buildings:
     folium.GeoJson(
         visible_buildings[['geometry', 'tooltip_html', 'unique_id']],
         name="Solar Potential",
@@ -598,3 +640,12 @@ st.markdown(f'''
      
      </div>
 ''', unsafe_allow_html=True)
+
+# Layer Visibility Toggles (Bottom Left Floating Panel)
+with st.container():
+    st.markdown('<div class="layer-control-anchor"></div>', unsafe_allow_html=True)
+    st.checkbox("Buildings", key="show_buildings")
+    st.checkbox("Loads", key="show_loads")
+    st.checkbox("Buses", key="show_buses")
+    st.checkbox("Lines", key="show_lines")
+    st.markdown('<div style="height: 10px;"></div>', unsafe_allow_html=True)
