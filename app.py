@@ -38,6 +38,8 @@ if "focused_building_id" not in st.session_state:
     st.session_state.focused_building_id = None
 if "full_circuit_gdf" not in st.session_state:
     st.session_state.full_circuit_gdf = None
+if "pinned_elements" not in st.session_state:
+    st.session_state.pinned_elements = {}  # unique_id -> [lat, lon]
 
 # Visibility Flags
 if "show_buildings" not in st.session_state:
@@ -364,7 +366,9 @@ def load_full_data():
         bus_mask = circuit_gdf['element_type'] == 'bus'
         circuit_gdf.loc[bus_mask, 'vm_pu'] = 1.0
 
-        # Tooltips will be generated lazily for better performance
+        # Ensure unique_id for circuit elements
+        if 'unique_id' not in circuit_gdf.columns:
+            circuit_gdf['unique_id'] = circuit_gdf['element_type'] + "_" + circuit_gdf['index'].astype(str)
 
     return gdf, circuit_gdf, center
 
@@ -542,6 +546,71 @@ if len(visible_buildings) > 0 and st.session_state.show_buildings:
         },
     ).add_to(m)
 
+# Add pinned data boxes with internal close buttons
+if st.session_state.pinned_elements:
+    pinned_fg = folium.FeatureGroup(name="Pinned Info").add_to(m)
+    for pid, pos in st.session_state.pinned_elements.items():
+        feat = full_gdf[full_gdf['unique_id'] == pid]
+        is_grid = False
+        if feat.empty:
+            feat = st.session_state.full_circuit_gdf[st.session_state.full_circuit_gdf['unique_id'] == pid]
+            is_grid = True
+        
+        if not feat.empty:
+            row = feat.iloc[0]
+            inner_html = make_building_tooltip(row) if not is_grid else make_circuit_tooltip(row)
+            
+            # Render a marker whose icon IS the entire data box with an 'X' button
+            folium.GeoJson(
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [pos[1], pos[0]]},
+                    "properties": {"unique_id": f"unpin_{pid}"}
+                },
+                marker=folium.Marker(
+                    location=pos,
+                    icon=folium.DivIcon(
+                        icon_size=(250, 200),
+                        icon_anchor=(250, 180), # Position box above and to the left of the point
+                        html=f"""
+                            <div style="
+                                background: white;
+                                border: 1px solid #ccc;
+                                border-radius: 12px;
+                                box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+                                width: 250px;
+                                position: relative;
+                                font-family: sans-serif;
+                                cursor: pointer;
+                                overflow: hidden;
+                            ">
+                                <div style="
+                                    position: absolute;
+                                    top: 8px;
+                                    right: 8px;
+                                    width: 20px;
+                                    height: 20px;
+                                    background: #444;
+                                    color: white;
+                                    border-radius: 50%;
+                                    display: flex;
+                                    align-items: center;
+                                    justify-content: center;
+                                    font-size: 14px;
+                                    font-weight: bold;
+                                    border: 1.5px solid white;
+                                    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+                                    z-index: 1000;
+                                ">×</div>
+                                <div style="padding: 2px;">
+                                    {inner_html}
+                                </div>
+                            </div>
+                        """
+                    )
+                )
+            ).add_to(pinned_fg)
+
 folium.LayerControl(position='bottomright', collapsed=False).add_to(m)
 
 # Render map
@@ -557,7 +626,7 @@ map_output = st_folium(
 if map_output:
     changed = False
     
-    # Handle building toggle
+    # Handle element pinning/toggle/unpin
     new_drawing = map_output.get("last_active_drawing")
     new_click_point = map_output.get("last_object_clicked")
     
@@ -566,17 +635,45 @@ if map_output:
     if click_id and click_id != st.session_state.last_processed_click:
         props = new_drawing.get("properties")
         if props and "unique_id" in props:
-            bid = props["unique_id"]
-            if bid in st.session_state.selected_buildings:
-                st.session_state.selected_buildings.remove(bid)
-            else:
-                st.session_state.selected_buildings.add(bid)
-            st.session_state.last_processed_click = click_id
+            pid = props["unique_id"]
             
-            # TRIGGER SIMULATION
-            with st.spinner("Recalculating Power Flow..."):
-                run_simulation(st.session_state.selected_buildings, full_gdf)
-            changed = True
+            # Check for Unpin Click (triggered by clicking the box)
+            if pid.startswith("unpin_"):
+                real_id = pid.replace("unpin_", "")
+                if real_id in st.session_state.pinned_elements:
+                    del st.session_state.pinned_elements[real_id]
+                    # Also unselect building if needed
+                    if real_id in st.session_state.selected_buildings:
+                        st.session_state.selected_buildings.remove(real_id)
+                        with st.spinner("Recalculating Power Flow..."):
+                            run_simulation(st.session_state.selected_buildings, full_gdf)
+                    changed = True
+            else:
+                # Toggle Pinning
+                if pid in st.session_state.pinned_elements:
+                    # If already pinned, unpin it
+                    del st.session_state.pinned_elements[pid]
+                    if pid in st.session_state.selected_buildings:
+                        st.session_state.selected_buildings.remove(pid)
+                        with st.spinner("Recalculating Power Flow..."):
+                            run_simulation(st.session_state.selected_buildings, full_gdf)
+                else:
+                    st.session_state.pinned_elements[pid] = [new_click_point['lat'], new_click_point['lng']]
+                    
+                    # If it's a building, also toggle solar selection
+                    is_building = any(full_gdf['unique_id'] == pid)
+                    if is_building:
+                        if pid in st.session_state.selected_buildings:
+                            st.session_state.selected_buildings.remove(pid)
+                        else:
+                            st.session_state.selected_buildings.add(pid)
+                        
+                        # TRIGGER SIMULATION
+                        with st.spinner("Recalculating Power Flow..."):
+                            run_simulation(st.session_state.selected_buildings, full_gdf)
+                changed = True
+
+            st.session_state.last_processed_click = click_id
 
     if map_output.get("center"):
         new_center = (map_output["center"]["lat"], map_output["center"]["lng"])
