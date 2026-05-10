@@ -486,6 +486,12 @@ if visible_grid is not None and len(visible_grid) > 0:
                     labels=False,
                     sticky=True,
                     max_width=300
+                ),
+                popup=folium.GeoJsonPopup(
+                    fields=["tooltip_html"],
+                    aliases=[""],
+                    labels=False,
+                    max_width=300
                 )
             ).add_to(fg)
             
@@ -520,6 +526,12 @@ if len(visible_buildings) > 0 and st.session_state.show_buildings:
             aliases=[""],
             labels=False,
             sticky=True,
+            max_width=300
+        ),
+        popup=folium.GeoJsonPopup(
+            fields=["tooltip_html"],
+            aliases=[""],
+            labels=False,
             max_width=300
         ),
         style_function=lambda x: {
