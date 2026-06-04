@@ -370,6 +370,21 @@ def load_full_data():
         if 'unique_id' not in circuit_gdf.columns:
             circuit_gdf['unique_id'] = circuit_gdf['element_type'] + "_" + circuit_gdf['index'].astype(str)
 
+    if 'bus_id' not in gdf.columns and circuit_gdf is not None:
+        buses = circuit_gdf[(circuit_gdf['element_type'] == 'bus') & (circuit_gdf['vn_kv'] <= 25.0)]
+        if not buses.empty:
+            from scipy.spatial import KDTree
+            import numpy as np
+            
+            centroids = gdf.geometry.centroid
+            bld_coords = np.array([[c.x, c.y] for c in centroids])
+            bus_coords = np.array([[g.x, g.y] for g in buses.geometry])
+            bus_ids = buses['index'].values.astype(int)
+            
+            tree = KDTree(bus_coords)
+            _, indices = tree.query(bld_coords)
+            gdf['bus_id'] = [bus_ids[idx] for idx in indices]
+
     return gdf, circuit_gdf, center
 
 with st.spinner("Loading Edmonton Solar & Grid Data..."):
