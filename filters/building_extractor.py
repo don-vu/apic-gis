@@ -7,7 +7,7 @@ import geopandas as gpd
 import numpy as np
 import os
 
-input_folder = "./data/tifs"
+input_folder = "./data/tif"
 output_folder = "./data/geojsons"
 os.makedirs(output_folder, exist_ok=True)
 

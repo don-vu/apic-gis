@@ -1,0 +1,8 @@
+{
+"type": "FeatureCollection",
+"name": "42183E592257N_buildings",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::3776" } },
+"features": [
+{ "type": "Feature", "properties": { "value": 1.0, "building_id": 0, "area": 0.011250000028048816 }, "geometry": { "type": "Polygon", "coordinates": [ [ [ 42344.025000000001455, 5922951.075000000186265 ], [ 42344.025000000001455, 5922951.0 ], [ 42344.17500000000291, 5922951.0 ], [ 42344.17500000000291, 5922951.075000000186265 ], [ 42344.025000000001455, 5922951.075000000186265 ] ] ] } }
+]
+}

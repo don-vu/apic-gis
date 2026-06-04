@@ -57,13 +57,13 @@ STEPS = {
         "desc": "Merge individual building GeoJSON files into a single merged file",
         "script": "utility/aggregator.py",
         "inputs": ["data/geojsons"],
-        "outputs": ["data/geojson/merged_buildings.geojson"]
+        "outputs": ["data/output/merged_buildings.geojson"]
     },
     4: {
         "name": "network",
         "desc": "Convert distribution circuit layer CSV and buildings GeoJSON to Pandapower JSON",
         "script": "filters/circuit_to_pandapower.py",
-        "inputs": ["data/csv/Circuit_Layer_20260430.csv", "data/geojson/merged_buildings.geojson"],
+        "inputs": ["data/csv/Circuit_Layer_20260430.csv", "data/output/merged_buildings.geojson"],
         "outputs": ["data/json/circuit_network.json"]
     },
     5: {
@@ -78,13 +78,13 @@ STEPS = {
         "desc": "Convert the grid network (including power flow results) to GeoJSON",
         "script": "filters/json_to_geojson.py",
         "inputs": ["data/json/circuit_network.json"],
-        "outputs": ["data/geojson/circuit_network.geojson"]
+        "outputs": ["data/output/circuit_network.geojson"]
     },
     7: {
         "name": "encode",
         "desc": "Convert massive GeoJSON layers into highly efficient Parquet files",
         "script": "utility/encoder.py",
-        "inputs": ["data/geojson/merged_buildings.geojson", "data/geojson/circuit_network.geojson"],
+        "inputs": ["data/output/merged_buildings.geojson", "data/output/circuit_network.geojson"],
         "outputs": ["data/output/merged_buildings.parquet", "data/output/circuit_network.parquet"]
     },
     8: {
@@ -107,7 +107,6 @@ def setup_directories() -> None:
         "data/csv",
         "data/tif",
         "data/geojsons",
-        "data/geojson",
         "data/json",
         "data/output"
     ]

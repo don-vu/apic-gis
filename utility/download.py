@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import time
 
-CSV_PATH = "./data/csv/Orthophoto_Repository_2023_20260501.csv"
+CSV_PATH = "./data/csv/Orthophoto_Repository_2023_20260603.csv"
 OUTPUT_DIR = "./data/tif/"
 MAX_WORKERS = 4 
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks

@@ -227,7 +227,7 @@ def convert_network_to_geojson(input_json, output_geojson):
 
 if __name__ == "__main__":
     input_file = "./data/json/circuit_network.json"
-    output_file = "./data/geojson/circuit_network.geojson"
+    output_file = "./data/output/circuit_network.geojson"
     
     if len(sys.argv) > 1:
         input_file = sys.argv[1]

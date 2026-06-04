@@ -510,7 +510,7 @@ def create_network_from_csv(csv_path: str, output_path: str, buildings_path: str
 
 if __name__ == "__main__":
     csv_path    = "./data/csv/Circuit_Layer_20260430.csv"
-    buildings_path = "./data/geojson/merged_buildings.geojson"
+    buildings_path = "./data/output/merged_buildings.geojson"
     output_path = "./data/output/circuit_network.geojson"
     json_path   = "./data/json/circuit_network.json"
 

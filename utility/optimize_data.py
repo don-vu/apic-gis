@@ -62,6 +62,34 @@ def optimize_buildings():
     gdf['homes_powered'] = gdf['solar_potential_kwh'] / 7200
     gdf['evs_charged'] = gdf['solar_potential_kwh'] / 3040
 
+    # Map each building to its nearest distribution bus (vn_kv <= 25)
+    circuit_path = "./data/output/circuit_network.parquet"
+    if os.path.exists(circuit_path):
+        print("Mapping buildings to buses...")
+        try:
+            from scipy.spatial import KDTree
+            import numpy as np
+            
+            circuit_gdf = gpd.read_parquet(circuit_path)
+            buses = circuit_gdf[(circuit_gdf['element_type'] == 'bus') & (circuit_gdf['vn_kv'] <= 25.0)]
+            if not buses.empty:
+                centroids = gdf.geometry.centroid
+                bld_coords = np.array([[c.x, c.y] for c in centroids])
+                bus_coords = np.array([[g.x, g.y] for g in buses.geometry])
+                bus_ids = buses['index'].values.astype(int)
+                
+                tree = KDTree(bus_coords)
+                _, indices = tree.query(bld_coords)
+                
+                gdf['bus_id'] = [bus_ids[idx] for idx in indices]
+                print(f"Successfully mapped {len(gdf)} buildings to buses.")
+            else:
+                print("No buses <= 25kV found in circuit_network.parquet.")
+        except Exception as e:
+            print(f"Error mapping buildings to buses: {e}")
+    else:
+        print(f"Warning: {circuit_path} not found. Cannot map buildings to buses.")
+
     output_path = "./data/output/buildings_optimized.parquet"
     gdf.to_parquet(output_path)
     print(f"Saved optimized buildings to {output_path}. Size: {os.path.getsize(output_path)/1024/1024:.2f} MB")
